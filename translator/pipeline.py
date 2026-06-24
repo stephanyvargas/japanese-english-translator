@@ -32,6 +32,7 @@ def _translate_with_context(
     new_japanese: str,
     history: list[str],
     client: anthropic.Anthropic,
+    model: str = "claude-sonnet-4-6",
 ) -> str:
     """Single-pass context-aware translation for conversation mode."""
     previous = "\n".join(f"[{i+1}] {t}" for i, t in enumerate(history[:-1]))
@@ -40,7 +41,7 @@ def _translate_with_context(
     user_msg = f"{context_block}NEW chunk to translate:\n{new_japanese}"
 
     with client.messages.stream(
-        model="claude-opus-4-8",
+        model=model,
         max_tokens=512,
         thinking={"type": "adaptive"},
         system=_CONVERSATION_SYSTEM,
@@ -55,6 +56,7 @@ def run_conversation(
     interval_seconds: int = 8,
     min_speech_ratio: float = 0.15,
     threshold: float = 0.02,
+    model: str = "claude-sonnet-4-6",
 ) -> None:
     """Continuous conversation translation with threaded audio capture.
 
@@ -103,7 +105,7 @@ def run_conversation(
             chunk_num += 1
 
             print(f"[JP] {new_text}", flush=True)
-            english = _translate_with_context(new_text, japanese_history, anthropic_client)
+            english = _translate_with_context(new_text, japanese_history, anthropic_client, model=model)
 
             print(f"[EN] {english}\n", flush=True)
 
@@ -139,24 +141,24 @@ def _make_notes(analysis, review_result, refined: bool) -> list[str]:
     return notes
 
 
-def run(japanese_text: str) -> FinalOutput:
+def run(japanese_text: str, model: str = "claude-sonnet-4-6") -> FinalOutput:
     """Full quality pipeline: analyze → translate → review → (refine if needed)."""
     anthropic_client = anthropic.Anthropic()
 
     print("[1/3] Analyzing text...", flush=True)
-    analysis = analyze(japanese_text, anthropic_client)
+    analysis = analyze(japanese_text, anthropic_client, model=model)
 
     print("[2/3] Translating...", flush=True)
-    english = translate(japanese_text, analysis, anthropic_client)
+    english = translate(japanese_text, analysis, anthropic_client, model=model)
 
     print("[3/3] Reviewing quality...", flush=True)
-    review_result = review(japanese_text, english, analysis, anthropic_client)
+    review_result = review(japanese_text, english, analysis, anthropic_client, model=model)
 
     refined = False
     if review_result.issues and review_result.accuracy_score < 8:
         print("[+] Refining based on editorial critique...", flush=True)
         english = translate(japanese_text, analysis, anthropic_client,
-                            critique=_build_critique(review_result))
+                            critique=_build_critique(review_result), model=model)
         refined = True
 
     return FinalOutput(
@@ -167,7 +169,7 @@ def run(japanese_text: str) -> FinalOutput:
     )
 
 
-def run_from_mic() -> FinalOutput:
+def run_from_mic(model: str = "claude-sonnet-4-6") -> FinalOutput:
     """Record one utterance from mic and run the full quality pipeline."""
     openai_client = OpenAI()
     wav_bytes = record_from_mic()
@@ -180,7 +182,7 @@ def run_from_mic() -> FinalOutput:
         sys.exit(1)
 
     print(f"Transcribed: {japanese_text}\n", flush=True)
-    return run(japanese_text)
+    return run(japanese_text, model=model)
 
 
 def run_continuous(max_seconds: int = 20, silence_ms: int = 600, threshold: float = 0.02) -> None:
