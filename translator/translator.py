@@ -46,4 +46,4 @@ def translate(
     ) as stream:
         msg = stream.get_final_message()
 
-    return next(b.text for b in msg.content if b.type == "text")
+    return next((b.text for b in msg.content if b.type == "text"), "")
