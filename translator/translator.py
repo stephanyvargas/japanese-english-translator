@@ -26,6 +26,7 @@ def translate(
     analysis: AnalysisResult,
     client: anthropic.Anthropic,
     critique: str | None = None,
+    model: str = "claude-sonnet-4-6",
 ) -> str:
     """Produce an English translation using adaptive thinking for deep reasoning."""
     context = _build_context(analysis, critique)
@@ -36,7 +37,7 @@ def translate(
     )
 
     with client.messages.stream(
-        model="claude-opus-4-8",
+        model=model,
         max_tokens=4096,
         thinking={"type": "adaptive"},
         output_config={"effort": "high"},
