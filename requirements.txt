@@ -1,0 +1,7 @@
+anthropic
+openai
+sounddevice
+scipy
+numpy
+pydantic
+python-dotenv
