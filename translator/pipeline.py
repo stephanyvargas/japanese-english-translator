@@ -49,7 +49,7 @@ def _translate_with_context(
     ) as stream:
         msg = stream.get_final_message()
 
-    return next(b.text for b in msg.content if b.type == "text").strip()
+    return next((b.text for b in msg.content if b.type == "text"), "").strip()
 
 
 def run_conversation(
@@ -106,6 +106,10 @@ def run_conversation(
 
             print(f"[JP] {new_text}", flush=True)
             english = _translate_with_context(new_text, japanese_history, anthropic_client, model=model)
+
+            if not english:
+                print("[translation produced no output — skipping]\n", flush=True)
+                continue
 
             print(f"[EN] {english}\n", flush=True)
 
