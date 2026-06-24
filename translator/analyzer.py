@@ -39,10 +39,10 @@ _TOOL = {
 }
 
 
-def analyze(japanese_text: str, client: anthropic.Anthropic) -> AnalysisResult:
+def analyze(japanese_text: str, client: anthropic.Anthropic, model: str = "claude-sonnet-4-6") -> AnalysisResult:
     """Run a linguistic analysis pass on the Japanese text."""
     with client.messages.stream(
-        model="claude-opus-4-8",
+        model=model,
         max_tokens=1024,
         system=ANALYZER_PROMPT,
         tools=[_TOOL],
