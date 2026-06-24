@@ -38,6 +38,7 @@ def review(
     english_text: str,
     analysis: AnalysisResult,
     client: anthropic.Anthropic,
+    model: str = "claude-sonnet-4-6",
 ) -> ReviewResult:
     """Run a bilingual quality review on the translation."""
     user_message = (
@@ -50,7 +51,7 @@ def review(
         user_message += "\nCultural notes: " + "; ".join(analysis.cultural_notes)
 
     with client.messages.stream(
-        model="claude-opus-4-8",
+        model=model,
         max_tokens=2048,
         thinking={"type": "adaptive"},
         system=REVIEWER_PROMPT,
