@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
 """
-Japanese-to-English translator.
+Spoken-language-to-English translator.
 
 Modes:
-  python3 main.py                        # conversation mode (default): mic always on,
-                                         #   translates every 8s with full context
-  python3 main.py --interval 12          # adjust how often a chunk is processed (seconds)
-  python3 main.py --once                 # single utterance, full quality pipeline, then exit
-  python3 main.py --text "日本語テキスト"  # translate typed text, full quality pipeline, exit
-  python3 main.py [--once|--text] --notes  # include translator's notes
+  python3 main.py                           # conversation mode (default): mic always on,
+                                            #   translates every 8s with full context
+  python3 main.py --interval 12             # adjust processing interval (seconds)
+  python3 main.py --once                    # single utterance, full quality pipeline, then exit
+  python3 main.py --text "テキスト"           # translate typed text, full quality pipeline, exit
+  python3 main.py [--once|--text] --notes   # include translator's notes
 
-Model selection (default: sonnet):
-  python3 main.py --model sonnet         # claude-sonnet-4-6  — balanced cost/quality
-  python3 main.py --model opus           # claude-opus-4-8    — highest quality
-  python3 main.py --model haiku          # claude-haiku-4-5   — fastest, cheapest
+Source language (default: ja):
+  python3 main.py --source-lang ko          # Korean
+  python3 main.py --source-lang zh          # Chinese
+  python3 main.py --source-lang es          # Spanish
+
+Model (default: sonnet):
+  python3 main.py --model sonnet            # claude-sonnet-4-6  — balanced cost/quality
+  python3 main.py --model opus              # claude-opus-4-8    — highest quality
+  python3 main.py --model haiku             # claude-haiku-4-5   — fastest, cheapest
 """
 
 import argparse
@@ -32,38 +37,65 @@ MODEL_ALIASES = {
     "haiku":  "claude-haiku-4-5",
 }
 
+LANGUAGE_NAMES = {
+    "ja": "Japanese",
+    "ko": "Korean",
+    "zh": "Chinese",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "pt": "Portuguese",
+    "it": "Italian",
+    "ru": "Russian",
+    "ar": "Arabic",
+}
+
 
 def resolve_model(name: str) -> str:
     return MODEL_ALIASES.get(name.lower(), name)
 
 
+def resolve_lang_name(code: str) -> str:
+    return LANGUAGE_NAMES.get(code.lower(), code.upper())
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Japanese -> English translator (quality-focused)")
-    parser.add_argument("--text", "-t", metavar="TEXT", help="Translate typed Japanese text and exit")
+    parser = argparse.ArgumentParser(description="Spoken-language-to-English translator")
+    parser.add_argument("--text", "-t", metavar="TEXT", help="Translate typed text and exit")
     parser.add_argument("--once", "-1", action="store_true",
                         help="Single mic utterance with full quality pipeline, then exit")
     parser.add_argument("--notes", "-n", action="store_true",
                         help="Print translator's notes (--once and --text only)")
     parser.add_argument("--model", "-m", default="sonnet", metavar="MODEL",
-                        help="Model to use: sonnet (default), opus, haiku, or a full model ID")
+                        help="Model: sonnet (default), opus, haiku, or a full model ID")
+    parser.add_argument("--source-lang", "-l", default="ja", metavar="LANG",
+                        help="Source language ISO code, e.g. ja, ko, zh, es, fr (default: ja)")
     parser.add_argument("--interval", type=int, default=8, metavar="SECS",
-                        help="How often to process accumulated audio in conversation mode (default: 8)")
+                        help="Processing interval in conversation mode (default: 8)")
     args = parser.parse_args()
 
     model = resolve_model(args.model)
-    print(f"Model: {model}", flush=True)
+    source_lang = args.source_lang.lower()
+    lang_name = resolve_lang_name(source_lang)
+
+    print(f"Model: {model} | Language: {lang_name} -> English", flush=True)
 
     try:
         if args.text:
-            result = run(args.text.strip(), model=model)
+            result = run(args.text.strip(), model=model, source_lang=source_lang, lang_name=lang_name)
             _print_result(result, args.notes)
 
         elif args.once:
-            result = run_from_mic(model=model)
+            result = run_from_mic(model=model, source_lang=source_lang, lang_name=lang_name)
             _print_result(result, args.notes)
 
         else:
-            run_conversation(interval_seconds=args.interval, model=model)
+            run_conversation(
+                interval_seconds=args.interval,
+                model=model,
+                source_lang=source_lang,
+                lang_name=lang_name,
+            )
 
     except KeyboardInterrupt:
         print("\nStopped.", file=sys.stderr)
