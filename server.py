@@ -7,11 +7,13 @@ Exposes two surfaces:
 """
 
 import asyncio
+import io
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 
 import anthropic
+import av
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -46,6 +48,28 @@ MODEL_ALIASES = {
     "opus": "claude-opus-4-8",
     "haiku": "claude-haiku-4-5",
 }
+
+
+def _to_wav(audio_bytes: bytes) -> bytes:
+    """Convert any browser audio (WebM/Ogg/MP4) to 16kHz mono s16 WAV via PyAV."""
+    in_buf = io.BytesIO(audio_bytes)
+    out_buf = io.BytesIO()
+    resampler = av.AudioResampler(format="s16", layout="mono", rate=16000)
+    with av.open(in_buf) as in_c:
+        in_stream = in_c.streams.audio[0]
+        with av.open(out_buf, "w", format="wav") as out_c:
+            out_stream = out_c.add_stream("pcm_s16le", rate=16000, layout="mono")
+            for frame in in_c.decode(in_stream):
+                for rf in resampler.resample(frame):
+                    for pkt in out_stream.encode(rf):
+                        out_c.mux(pkt)
+            for rf in resampler.resample(None):
+                for pkt in out_stream.encode(rf):
+                    out_c.mux(pkt)
+            for pkt in out_stream.encode(None):
+                out_c.mux(pkt)
+    out_buf.seek(0)
+    return out_buf.read()
 
 
 # ── REST ─────────────────────────────────────────────────────────────────────
@@ -117,8 +141,9 @@ async def ws_conversation(ws: WebSocket):
             data = await ws.receive_bytes()
 
             # Run transcription + translation in thread pool (blocking SDK calls)
-            def process(wav_bytes: bytes) -> dict:
+            def process(raw_bytes: bytes) -> dict:
                 prompt = source_history[-1] if source_history else ""
+                wav_bytes = _to_wav(raw_bytes)
                 text = transcribe(wav_bytes, openai_client, prompt=prompt, source_lang=source_lang)
                 if not text.strip():
                     return {"skipped": True}
