@@ -19,7 +19,7 @@ def _lazy_imports():
         print(
             f"Microphone input unavailable: {e}\n"
             "Install PortAudio (e.g. 'sudo apt install libportaudio2') and try again.\n"
-            "You can also use --text to provide Japanese text directly.",
+            "You can also use --text to provide source text directly.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -58,7 +58,6 @@ class AudioCapture:
             self._thread.join(timeout=2)
 
     def drain(self) -> list:
-        """Return and clear all accumulated audio frames."""
         frames = []
         while True:
             try:
@@ -68,7 +67,6 @@ class AudioCapture:
         return frames
 
     def speech_ratio(self, frames, threshold: float) -> float:
-        """Fraction of frames that contain speech (RMS above threshold)."""
         if not frames:
             return 0.0
         np = self._np
@@ -90,7 +88,12 @@ class AudioCapture:
             print(f"\n[Audio thread error: {e}]", file=sys.stderr)
 
 
-def record_from_mic(max_seconds: int = 30, silence_ms: int = 600, threshold: float = 0.02) -> bytes:
+def record_from_mic(
+    max_seconds: int = 30,
+    silence_ms: int = 600,
+    threshold: float = 0.02,
+    lang_name: str = "source language",
+) -> bytes:
     """Record a single utterance. Stops on silence or max_seconds."""
     np, wavfile, sd = _lazy_imports()
 
@@ -98,7 +101,7 @@ def record_from_mic(max_seconds: int = 30, silence_ms: int = 600, threshold: flo
     silence_chunks_needed = int(silence_ms / (CHUNK_SECS * 1000))
     max_chunks = int(max_seconds / CHUNK_SECS)
 
-    print("Listening... speak Japanese now. (Recording stops after a pause)", flush=True)
+    print(f"Listening... speak in {lang_name} now. (Recording stops after a pause)", flush=True)
 
     audio_frames: list = []
     silent_count = 0
@@ -138,6 +141,7 @@ def stream_chunks(
     max_seconds: int = 20,
     silence_ms: int = 600,
     threshold: float = 0.02,
+    lang_name: str = "source language",
 ) -> Iterator[bytes]:
     """Yield WAV chunks on natural pauses or hard cap. No threading — mic gaps during processing."""
     np, wavfile, sd = _lazy_imports()
@@ -146,7 +150,7 @@ def stream_chunks(
     silence_chunks_needed = int(silence_ms / (CHUNK_SECS * 1000))
     max_chunks = int(max_seconds / CHUNK_SECS)
 
-    print("Listening — speak Japanese. Ctrl+C to stop.\n", flush=True)
+    print(f"Listening — speak in {lang_name}. Ctrl+C to stop.\n", flush=True)
 
     while True:
         audio_frames: list = []
