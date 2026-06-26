@@ -107,28 +107,26 @@ translateBtn.addEventListener('click', async () => {
 
 // ── Conversation mode ─────────────────────────────────────────────────────────
 
-let mediaRecorder = null;
+let activeStream = null;
 let ws = null;
+let active = false;
 const INTERVAL_MS = 8000;
 
 startBtn.addEventListener('click', startConversation);
 stopBtn.addEventListener('click', stopConversation);
 
 async function startConversation() {
-  let stream;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    activeStream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (err) {
     convStatus.textContent = 'Mic access denied';
     return;
   }
 
-  // Open WebSocket
   const wsUrl = apiBase().replace(/^http/, 'ws') + '/ws/conversation';
   ws = new WebSocket(wsUrl);
 
   ws.onopen = () => {
-    // Send config frame first
     ws.send(JSON.stringify({
       model: modelSel.value,
       source_lang: sourceLang.value,
@@ -140,50 +138,48 @@ async function startConversation() {
   ws.onmessage = (evt) => {
     const msg = JSON.parse(evt.data);
     if (msg.skipped) return;
-    if (msg.error) {
-      appendChunk({ error: msg.error });
-      return;
-    }
-    appendChunk({
-      source: msg.source,
-      english: msg.english,
-      langTag: (sourceLang.value).toUpperCase(),
-    });
+    if (msg.error) { appendChunk({ error: msg.error }); return; }
+    appendChunk({ source: msg.source, english: msg.english, langTag: sourceLang.value.toUpperCase() });
   };
 
   ws.onerror = () => { convStatus.textContent = 'WebSocket error'; };
-  ws.onclose = () => { if (mediaRecorder) stopConversation(); };
+  ws.onclose = () => { if (active) stopConversation(); };
 
-  // Start MediaRecorder — sends a chunk every INTERVAL_MS
-  mediaRecorder = new MediaRecorder(stream);
-
-  mediaRecorder.ondataavailable = async (e) => {
-    if (!e.data || e.data.size === 0) return;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-
-    // Convert Blob → WAV-compatible ArrayBuffer and send as binary
-    const buf = await e.data.arrayBuffer();
-    ws.send(buf);
-    convStatus.textContent = `Last chunk: ${(e.data.size / 1024).toFixed(1)} KB`;
-  };
-
-  mediaRecorder.start(INTERVAL_MS);
-
+  active = true;
   startBtn.disabled = true;
   stopBtn.disabled = false;
   convStatus.innerHTML = '<span class="recording-dot"></span>Recording...';
+
+  // Cycle stop/start so each recording is a complete, self-contained WebM file.
+  // Using timeslice produces headerless continuation chunks that Whisper rejects.
+  recordCycle();
+}
+
+function recordCycle() {
+  if (!active || !activeStream) return;
+
+  const rec = new MediaRecorder(activeStream);
+
+  rec.ondataavailable = async (e) => {
+    if (!e.data || e.data.size === 0) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    convStatus.textContent = `Sent ${(e.data.size / 1024).toFixed(1)} KB — translating...`;
+    ws.send(await e.data.arrayBuffer());
+  };
+
+  rec.onstop = () => { if (active) recordCycle(); };
+
+  rec.start();
+  setTimeout(() => { if (rec.state === 'recording') rec.stop(); }, INTERVAL_MS);
 }
 
 function stopConversation() {
-  if (mediaRecorder) {
-    mediaRecorder.stop();
-    mediaRecorder.stream.getTracks().forEach(t => t.stop());
-    mediaRecorder = null;
+  active = false;
+  if (activeStream) {
+    activeStream.getTracks().forEach(t => t.stop());
+    activeStream = null;
   }
-  if (ws) {
-    ws.close();
-    ws = null;
-  }
+  if (ws) { ws.close(); ws = null; }
   startBtn.disabled = false;
   stopBtn.disabled = true;
   convStatus.textContent = 'Stopped';
