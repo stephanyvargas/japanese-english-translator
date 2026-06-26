@@ -12,10 +12,11 @@ from .transcriber import transcribe
 from .translator import translate
 
 
-def _get_conversation_system(lang_name: str) -> str:
+def _get_conversation_system(lang_name: str, context: str = "") -> str:
+    context_line = f"\nSetting: {context}\n" if context else ""
     return f"""\
 You are a real-time {lang_name}-to-English conversation interpreter.
-
+{context_line}
 You receive the conversation transcript so far (in {lang_name}) plus a new chunk to translate.
 Use the full history to resolve pronouns, implicit subjects, topic references, and incomplete
 sentences — context that would be impossible to translate in isolation.
@@ -36,6 +37,7 @@ def _translate_with_context(
     client: anthropic.Anthropic,
     model: str = "claude-sonnet-4-6",
     lang_name: str = "Japanese",
+    context: str = "",
 ) -> str:
     """Single-pass context-aware translation for conversation mode."""
     previous = "\n".join(f"[{i+1}] {t}" for i, t in enumerate(history[:-1]))
@@ -47,7 +49,7 @@ def _translate_with_context(
         model=model,
         max_tokens=512,
         thinking={"type": "adaptive"},
-        system=_get_conversation_system(lang_name),
+        system=_get_conversation_system(lang_name, context),
         messages=[{"role": "user", "content": user_msg}],
     ) as stream:
         msg = stream.get_final_message()
@@ -62,6 +64,7 @@ def run_conversation(
     model: str = "claude-sonnet-4-6",
     source_lang: str = "ja",
     lang_name: str = "Japanese",
+    context: str = "",
 ) -> None:
     """Continuous conversation translation with threaded audio capture."""
     anthropic_client = anthropic.Anthropic()
@@ -107,7 +110,7 @@ def run_conversation(
 
             print(f"[{lang_tag}] {new_text}", flush=True)
             english = _translate_with_context(
-                new_text, source_history, anthropic_client, model=model, lang_name=lang_name
+                new_text, source_history, anthropic_client, model=model, lang_name=lang_name, context=context
             )
 
             if not english:
@@ -153,25 +156,29 @@ def run(
     model: str = "claude-sonnet-4-6",
     source_lang: str = "ja",
     lang_name: str = "Japanese",
+    context: str = "",
 ) -> FinalOutput:
     """Full quality pipeline: analyze → translate → review → (refine if needed)."""
     anthropic_client = anthropic.Anthropic()
 
     print("[1/3] Analyzing text...", flush=True)
-    analysis = analyze(source_text, anthropic_client, model=model, source_lang=source_lang, lang_name=lang_name)
+    analysis = analyze(source_text, anthropic_client, model=model, source_lang=source_lang,
+                       lang_name=lang_name, context=context)
 
     print("[2/3] Translating...", flush=True)
-    english = translate(source_text, analysis, anthropic_client, model=model, lang_name=lang_name)
+    english = translate(source_text, analysis, anthropic_client, model=model, lang_name=lang_name,
+                        context=context)
 
     print("[3/3] Reviewing quality...", flush=True)
-    review_result = review(source_text, english, analysis, anthropic_client, model=model, lang_name=lang_name)
+    review_result = review(source_text, english, analysis, anthropic_client, model=model,
+                           lang_name=lang_name, context=context)
 
     refined = False
     if review_result.issues and review_result.accuracy_score < 8:
         print("[+] Refining based on editorial critique...", flush=True)
         english = translate(
             source_text, analysis, anthropic_client,
-            critique=_build_critique(review_result), model=model, lang_name=lang_name,
+            critique=_build_critique(review_result), model=model, lang_name=lang_name, context=context,
         )
         refined = True
 
@@ -187,6 +194,7 @@ def run_from_mic(
     model: str = "claude-sonnet-4-6",
     source_lang: str = "ja",
     lang_name: str = "Japanese",
+    context: str = "",
 ) -> FinalOutput:
     """Record one utterance from mic and run the full quality pipeline."""
     openai_client = OpenAI()
@@ -200,7 +208,7 @@ def run_from_mic(
         sys.exit(1)
 
     print(f"Transcribed: {source_text}\n", flush=True)
-    return run(source_text, model=model, source_lang=source_lang, lang_name=lang_name)
+    return run(source_text, model=model, source_lang=source_lang, lang_name=lang_name, context=context)
 
 
 def run_continuous(
