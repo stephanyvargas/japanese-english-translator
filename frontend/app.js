@@ -110,11 +110,20 @@ translateBtn.addEventListener('click', async () => {
 // AudioContext (which handles all of them) then repack as WAV so Whisper always
 // receives a format it can decode.
 
+// Reuse a single AudioContext — browsers cap how many can exist at once.
+let _audioCtx = null;
+function getAudioCtx() {
+  if (!_audioCtx || _audioCtx.state === 'closed') {
+    _audioCtx = new AudioContext({ sampleRate: 16000 });
+  }
+  return _audioCtx;
+}
+
+// Returns an ArrayBuffer (WAV) or null if the chunk is too short to send.
 async function blobToWav(blob) {
   const arrayBuffer = await blob.arrayBuffer();
-  const audioCtx = new AudioContext({ sampleRate: 16000 });
-  const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-  await audioCtx.close();
+  const audioBuffer = await getAudioCtx().decodeAudioData(arrayBuffer);
+  if (audioBuffer.duration < 0.5) return null; // Whisper rejects sub-second clips
   return audioBufferToWav(audioBuffer);
 }
 
@@ -203,9 +212,15 @@ function recordCycle() {
   rec.ondataavailable = async (e) => {
     if (!e.data || e.data.size === 0) return;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    const wav = await blobToWav(e.data);
-    convStatus.textContent = `Sent ${(wav.byteLength / 1024).toFixed(1)} KB WAV — translating...`;
-    ws.send(wav);
+    try {
+      const wav = await blobToWav(e.data);
+      if (!wav) { convStatus.textContent = 'Chunk too short — skipped'; return; }
+      convStatus.textContent = `Sent ${(wav.byteLength / 1024).toFixed(1)} KB WAV — translating...`;
+      ws.send(wav);
+    } catch (err) {
+      console.warn('Audio conversion failed:', err);
+      convStatus.textContent = 'Audio conversion error — skipping chunk';
+    }
   };
 
   rec.onstop = () => { if (active) recordCycle(); };
