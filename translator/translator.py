@@ -1,14 +1,14 @@
 import anthropic
 
 from .models import AnalysisResult
-from .prompts import TRANSLATOR_PROMPT
+from .prompts import get_translator_prompt
 
 
-def _build_context(analysis: AnalysisResult, critique: str | None) -> str:
+def _build_context(analysis: AnalysisResult, lang_name: str, critique: str | None) -> str:
     lines = [
         f"Domain: {analysis.domain}",
         f"Formality: {analysis.formality_level}",
-        f"Uses keigo: {analysis.has_keigo}",
+        f"Uses honorifics: {analysis.has_honorifics}",
     ]
     if analysis.implicit_subjects:
         lines.append("Implicit subjects: " + ", ".join(analysis.implicit_subjects))
@@ -22,17 +22,18 @@ def _build_context(analysis: AnalysisResult, critique: str | None) -> str:
 
 
 def translate(
-    japanese_text: str,
+    source_text: str,
     analysis: AnalysisResult,
     client: anthropic.Anthropic,
     critique: str | None = None,
     model: str = "claude-sonnet-4-6",
+    lang_name: str = "Japanese",
 ) -> str:
     """Produce an English translation using adaptive thinking for deep reasoning."""
-    context = _build_context(analysis, critique)
+    context = _build_context(analysis, lang_name, critique)
     user_message = (
         f"Linguistic context:\n{context}\n\n"
-        f"Japanese source:\n{japanese_text}\n\n"
+        f"{lang_name} source:\n{source_text}\n\n"
         "Translate to English:"
     )
 
@@ -41,7 +42,7 @@ def translate(
         max_tokens=4096,
         thinking={"type": "adaptive"},
         output_config={"effort": "high"},
-        system=TRANSLATOR_PROMPT,
+        system=get_translator_prompt(lang_name),
         messages=[{"role": "user", "content": user_message}],
     ) as stream:
         msg = stream.get_final_message()
