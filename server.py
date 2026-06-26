@@ -142,8 +142,13 @@ async def ws_conversation(ws: WebSocket):
 
             # Run transcription + translation in thread pool (blocking SDK calls)
             def process(raw_bytes: bytes) -> dict:
+                if len(raw_bytes) < 1000:
+                    return {"skipped": True}
+                try:
+                    wav_bytes = _to_wav(raw_bytes)
+                except Exception:
+                    return {"skipped": True}
                 prompt = source_history[-1] if source_history else ""
-                wav_bytes = _to_wav(raw_bytes)
                 text = transcribe(wav_bytes, openai_client, prompt=prompt, source_lang=source_lang)
                 if not text.strip():
                     return {"skipped": True}
