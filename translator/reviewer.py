@@ -34,18 +34,19 @@ _TOOL = {
 
 
 def review(
-    japanese_text: str,
+    source_text: str,
     english_text: str,
     analysis: AnalysisResult,
     client: anthropic.Anthropic,
     model: str = "claude-sonnet-4-6",
+    lang_name: str = "Japanese",
 ) -> ReviewResult:
     """Run a bilingual quality review on the translation."""
     user_message = (
-        f"Source (Japanese):\n{japanese_text}\n\n"
+        f"Source ({lang_name}):\n{source_text}\n\n"
         f"Translation (English):\n{english_text}\n\n"
         f"Context: domain={analysis.domain}, formality={analysis.formality_level}, "
-        f"has_keigo={analysis.has_keigo}"
+        f"has_honorifics={analysis.has_honorifics}"
     )
     if analysis.cultural_notes:
         user_message += "\nCultural notes: " + "; ".join(analysis.cultural_notes)
