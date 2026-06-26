@@ -105,6 +105,46 @@ translateBtn.addEventListener('click', async () => {
   }
 });
 
+// ── Audio → WAV conversion ────────────────────────────────────────────────────
+// MediaRecorder produces WebM/Ogg/MP4 depending on browser. We decode with
+// AudioContext (which handles all of them) then repack as WAV so Whisper always
+// receives a format it can decode.
+
+async function blobToWav(blob) {
+  const arrayBuffer = await blob.arrayBuffer();
+  const audioCtx = new AudioContext({ sampleRate: 16000 });
+  const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+  await audioCtx.close();
+  return audioBufferToWav(audioBuffer);
+}
+
+function audioBufferToWav(buffer) {
+  const sampleRate = buffer.sampleRate;
+  const samples = buffer.getChannelData(0); // mono
+  const int16 = new Int16Array(samples.length);
+  for (let i = 0; i < samples.length; i++) {
+    int16[i] = Math.max(-32768, Math.min(32767, samples[i] * 32768));
+  }
+
+  const wavBuffer = new ArrayBuffer(44 + int16.byteLength);
+  const v = new DataView(wavBuffer);
+  const s = (o, str) => { for (let i = 0; i < str.length; i++) v.setUint8(o + i, str.charCodeAt(i)); };
+
+  s(0,  'RIFF');  v.setUint32(4,  36 + int16.byteLength, true);
+  s(8,  'WAVE');  s(12, 'fmt ');
+  v.setUint32(16, 16, true);          // chunk size
+  v.setUint16(20, 1,  true);          // PCM
+  v.setUint16(22, 1,  true);          // mono
+  v.setUint32(24, sampleRate, true);
+  v.setUint32(28, sampleRate * 2, true); // byte rate
+  v.setUint16(32, 2,  true);          // block align
+  v.setUint16(34, 16, true);          // bits per sample
+  s(36, 'data'); v.setUint32(40, int16.byteLength, true);
+  new Int16Array(wavBuffer, 44).set(int16);
+
+  return wavBuffer;
+}
+
 // ── Conversation mode ─────────────────────────────────────────────────────────
 
 let activeStream = null;
@@ -163,8 +203,9 @@ function recordCycle() {
   rec.ondataavailable = async (e) => {
     if (!e.data || e.data.size === 0) return;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    convStatus.textContent = `Sent ${(e.data.size / 1024).toFixed(1)} KB — translating...`;
-    ws.send(await e.data.arrayBuffer());
+    const wav = await blobToWav(e.data);
+    convStatus.textContent = `Sent ${(wav.byteLength / 1024).toFixed(1)} KB WAV — translating...`;
+    ws.send(wav);
   };
 
   rec.onstop = () => { if (active) recordCycle(); };
