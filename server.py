@@ -119,7 +119,7 @@ async def ws_conversation(ws: WebSocket):
             # Run transcription + translation in thread pool (blocking SDK calls)
             def process(wav_bytes: bytes) -> dict:
                 prompt = source_history[-1] if source_history else ""
-                text = transcribe(wav_bytes, openai_client, prompt=prompt, source_lang=source_lang)
+                text = transcribe(wav_bytes, openai_client, prompt=prompt, source_lang=source_lang, filename="audio.webm")
                 if not text.strip():
                     return {"skipped": True}
                 source_history.append(text)

@@ -7,7 +7,7 @@ _AVG_LOGPROB_THRESHOLD = -1.0
 _COMPRESSION_RATIO_THRESHOLD = 2.4
 
 
-def transcribe(wav_bytes: bytes, client: OpenAI, prompt: str = "", source_lang: str = "ja") -> str:
+def transcribe(wav_bytes: bytes, client: OpenAI, prompt: str = "", source_lang: str = "ja", filename: str = "audio.wav") -> str:
     """Transcribe WAV bytes via Whisper, filtering hallucinated segments.
 
     Uses verbose_json to inspect per-segment confidence metrics and discard
@@ -15,7 +15,7 @@ def transcribe(wav_bytes: bytes, client: OpenAI, prompt: str = "", source_lang: 
     Returns an empty string if nothing real was detected.
     """
     audio_file = io.BytesIO(wav_bytes)
-    audio_file.name = "audio.wav"
+    audio_file.name = filename
 
     kwargs = dict(
         model="whisper-1",
