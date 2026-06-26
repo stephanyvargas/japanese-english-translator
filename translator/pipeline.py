@@ -11,17 +11,19 @@ from .reviewer import review
 from .transcriber import transcribe
 from .translator import translate
 
-_CONVERSATION_SYSTEM = """\
-You are a real-time Japanese conversation interpreter.
 
-You receive the conversation transcript so far (in Japanese) plus a new chunk to translate.
+def _get_conversation_system(lang_name: str) -> str:
+    return f"""\
+You are a real-time {lang_name}-to-English conversation interpreter.
+
+You receive the conversation transcript so far (in {lang_name}) plus a new chunk to translate.
 Use the full history to resolve pronouns, implicit subjects, topic references, and incomplete
 sentences — context that would be impossible to translate in isolation.
 
 Rules:
 - Output ONLY the English translation of the NEW chunk — nothing else, no labels, no commentary
-- Short utterances (うん, はいはい, あのー, えっと) → natural English equivalents: \
-"Yeah.", "Right, right.", "So, um...", "Uh..."
+- Short utterances and conversational fillers → natural English equivalents \
+("Yeah.", "Right, right.", "So, um...", "Uh...")
 - Incomplete sentences → translate as-is, let the incompleteness show in English
 - Names and untranslatable loanwords → keep or romanize
 - Genuine noise or silence → output "(inaudible)"
@@ -29,22 +31,23 @@ Rules:
 
 
 def _translate_with_context(
-    new_japanese: str,
+    new_source: str,
     history: list[str],
     client: anthropic.Anthropic,
     model: str = "claude-sonnet-4-6",
+    lang_name: str = "Japanese",
 ) -> str:
     """Single-pass context-aware translation for conversation mode."""
     previous = "\n".join(f"[{i+1}] {t}" for i, t in enumerate(history[:-1]))
     context_block = f"Conversation so far:\n{previous}\n\n" if previous else "(start of conversation)\n\n"
 
-    user_msg = f"{context_block}NEW chunk to translate:\n{new_japanese}"
+    user_msg = f"{context_block}NEW chunk to translate:\n{new_source}"
 
     with client.messages.stream(
         model=model,
         max_tokens=512,
         thinking={"type": "adaptive"},
-        system=_CONVERSATION_SYSTEM,
+        system=_get_conversation_system(lang_name),
         messages=[{"role": "user", "content": user_msg}],
     ) as stream:
         msg = stream.get_final_message()
@@ -57,21 +60,19 @@ def run_conversation(
     min_speech_ratio: float = 0.15,
     threshold: float = 0.02,
     model: str = "claude-sonnet-4-6",
+    source_lang: str = "ja",
+    lang_name: str = "Japanese",
 ) -> None:
-    """Continuous conversation translation with threaded audio capture.
-
-    The mic runs on a background thread the entire time, so nothing is lost
-    while Claude is translating. Every interval_seconds, accumulated audio is
-    transcribed and translated in full conversational context.
-    """
+    """Continuous conversation translation with threaded audio capture."""
     anthropic_client = anthropic.Anthropic()
     openai_client = OpenAI()
 
     capture = AudioCapture()
     capture.start()
 
-    japanese_history: list[str] = []
+    source_history: list[str] = []
     chunk_num = 0
+    lang_tag = source_lang.upper()
 
     print(
         f"Conversation mode — mic is always on, translating every ~{interval_seconds}s.\n"
@@ -92,20 +93,22 @@ def run_conversation(
                 continue
 
             wav_bytes, duration = capture.to_wav(frames)
-            prompt = japanese_history[-1] if japanese_history else ""
+            prompt = source_history[-1] if source_history else ""
 
             print(f"[{duration:.1f}s audio → transcribing...]", flush=True)
-            new_text = transcribe(wav_bytes, openai_client, prompt=prompt)
+            new_text = transcribe(wav_bytes, openai_client, prompt=prompt, source_lang=source_lang)
 
             if not new_text.strip():
                 print("[silence/noise — skipped]\n", flush=True)
                 continue
 
-            japanese_history.append(new_text)
+            source_history.append(new_text)
             chunk_num += 1
 
-            print(f"[JP] {new_text}", flush=True)
-            english = _translate_with_context(new_text, japanese_history, anthropic_client, model=model)
+            print(f"[{lang_tag}] {new_text}", flush=True)
+            english = _translate_with_context(
+                new_text, source_history, anthropic_client, model=model, lang_name=lang_name
+            )
 
             if not english:
                 print("[translation produced no output — skipping]\n", flush=True)
@@ -119,7 +122,7 @@ def run_conversation(
         capture.stop()
 
 
-# ── Single-shot and legacy modes ──────────────────────────────────────────────
+# ── Single-shot and quality pipeline ─────────────────────────────────────────
 
 def _build_critique(rev) -> str:
     parts = [f"Accuracy: {rev.accuracy_score}/10, Naturalness: {rev.naturalness_score}/10"]
@@ -130,10 +133,10 @@ def _build_critique(rev) -> str:
     return "\n".join(parts)
 
 
-def _make_notes(analysis, review_result, refined: bool) -> list[str]:
+def _make_notes(analysis, review_result, lang_name: str, refined: bool) -> list[str]:
     notes: list[str] = []
-    if analysis.has_keigo:
-        notes.append(f"Keigo detected ({analysis.formality_level}): honorific level reflected in register.")
+    if analysis.has_honorifics:
+        notes.append(f"Honorific register detected ({analysis.formality_level}): conveyed through English register.")
     for note in analysis.cultural_notes:
         notes.append(f"Cultural: {note}")
     if analysis.implicit_subjects:
@@ -145,70 +148,89 @@ def _make_notes(analysis, review_result, refined: bool) -> list[str]:
     return notes
 
 
-def run(japanese_text: str, model: str = "claude-sonnet-4-6") -> FinalOutput:
+def run(
+    source_text: str,
+    model: str = "claude-sonnet-4-6",
+    source_lang: str = "ja",
+    lang_name: str = "Japanese",
+) -> FinalOutput:
     """Full quality pipeline: analyze → translate → review → (refine if needed)."""
     anthropic_client = anthropic.Anthropic()
 
     print("[1/3] Analyzing text...", flush=True)
-    analysis = analyze(japanese_text, anthropic_client, model=model)
+    analysis = analyze(source_text, anthropic_client, model=model, source_lang=source_lang, lang_name=lang_name)
 
     print("[2/3] Translating...", flush=True)
-    english = translate(japanese_text, analysis, anthropic_client, model=model)
+    english = translate(source_text, analysis, anthropic_client, model=model, lang_name=lang_name)
 
     print("[3/3] Reviewing quality...", flush=True)
-    review_result = review(japanese_text, english, analysis, anthropic_client, model=model)
+    review_result = review(source_text, english, analysis, anthropic_client, model=model, lang_name=lang_name)
 
     refined = False
     if review_result.issues and review_result.accuracy_score < 8:
         print("[+] Refining based on editorial critique...", flush=True)
-        english = translate(japanese_text, analysis, anthropic_client,
-                            critique=_build_critique(review_result), model=model)
+        english = translate(
+            source_text, analysis, anthropic_client,
+            critique=_build_critique(review_result), model=model, lang_name=lang_name,
+        )
         refined = True
 
     return FinalOutput(
-        japanese_source=japanese_text,
+        source_text=source_text,
         english_text=english,
-        translator_notes=_make_notes(analysis, review_result, refined),
+        translator_notes=_make_notes(analysis, review_result, lang_name, refined),
         analysis=analysis,
     )
 
 
-def run_from_mic(model: str = "claude-sonnet-4-6") -> FinalOutput:
+def run_from_mic(
+    model: str = "claude-sonnet-4-6",
+    source_lang: str = "ja",
+    lang_name: str = "Japanese",
+) -> FinalOutput:
     """Record one utterance from mic and run the full quality pipeline."""
     openai_client = OpenAI()
-    wav_bytes = record_from_mic()
+    wav_bytes = record_from_mic(lang_name=lang_name)
 
     print("Transcribing...", flush=True)
-    japanese_text = transcribe(wav_bytes, openai_client)
+    source_text = transcribe(wav_bytes, openai_client, source_lang=source_lang)
 
-    if not japanese_text.strip():
+    if not source_text.strip():
         print("No speech transcribed. Please try again.", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Transcribed: {japanese_text}\n", flush=True)
-    return run(japanese_text, model=model)
+    print(f"Transcribed: {source_text}\n", flush=True)
+    return run(source_text, model=model, source_lang=source_lang, lang_name=lang_name)
 
 
-def run_continuous(max_seconds: int = 20, silence_ms: int = 600, threshold: float = 0.02) -> None:
+def run_continuous(
+    max_seconds: int = 20,
+    silence_ms: int = 600,
+    threshold: float = 0.02,
+    model: str = "claude-sonnet-4-6",
+    source_lang: str = "ja",
+    lang_name: str = "Japanese",
+) -> None:
     """Pause-triggered mode: translate each utterance as it finishes (no threading)."""
     anthropic_client = anthropic.Anthropic()
     openai_client = OpenAI()
     previous_transcript = ""
     chunk_num = 0
 
-    for wav_bytes in stream_chunks(max_seconds=max_seconds, silence_ms=silence_ms, threshold=threshold):
+    for wav_bytes in stream_chunks(max_seconds=max_seconds, silence_ms=silence_ms,
+                                   threshold=threshold, lang_name=lang_name):
         print("Transcribing...", flush=True)
-        japanese_text = transcribe(wav_bytes, openai_client, prompt=previous_transcript)
+        source_text = transcribe(wav_bytes, openai_client, prompt=previous_transcript, source_lang=source_lang)
 
-        if not japanese_text.strip():
+        if not source_text.strip():
             print("(no speech in chunk, listening again)\n", flush=True)
             continue
 
-        print(f"Transcribed: {japanese_text}\n", flush=True)
-        previous_transcript = japanese_text
+        print(f"Transcribed: {source_text}\n", flush=True)
+        previous_transcript = source_text
         chunk_num += 1
-        result = run(japanese_text)
+        result = run(source_text, model=model, source_lang=source_lang, lang_name=lang_name)
 
-        print(f"\n── Chunk {chunk_num} ──")
+        print(f"\n-- Chunk {chunk_num} --")
         print(result.english_text)
         print()
