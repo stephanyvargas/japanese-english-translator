@@ -2,16 +2,12 @@ import io
 
 from openai import OpenAI
 
-# Whisper hallucination filters (per segment):
-# - no_speech_prob > 0.6  → segment is likely silence or music
-# - avg_logprob < -1.0    → model is very uncertain (garbage in)
-# - compression_ratio > 2.4 → output is suspiciously repetitive
 _NO_SPEECH_THRESHOLD = 0.6
 _AVG_LOGPROB_THRESHOLD = -1.0
 _COMPRESSION_RATIO_THRESHOLD = 2.4
 
 
-def transcribe(wav_bytes: bytes, client: OpenAI, prompt: str = "") -> str:
+def transcribe(wav_bytes: bytes, client: OpenAI, prompt: str = "", source_lang: str = "ja") -> str:
     """Transcribe WAV bytes via Whisper, filtering hallucinated segments.
 
     Uses verbose_json to inspect per-segment confidence metrics and discard
@@ -21,7 +17,12 @@ def transcribe(wav_bytes: bytes, client: OpenAI, prompt: str = "") -> str:
     audio_file = io.BytesIO(wav_bytes)
     audio_file.name = "audio.wav"
 
-    kwargs = dict(model="whisper-1", file=audio_file, language="ja", response_format="verbose_json")
+    kwargs = dict(
+        model="whisper-1",
+        file=audio_file,
+        language=source_lang,
+        response_format="verbose_json",
+    )
     if prompt:
         kwargs["prompt"] = prompt
 
