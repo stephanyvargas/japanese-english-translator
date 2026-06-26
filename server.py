@@ -1,0 +1,156 @@
+"""FastAPI backend for the translator web UI.
+
+Exposes two surfaces:
+  POST /translate          — full quality pipeline (text input)
+  WS   /ws/conversation   — real-time conversation mode (audio from browser)
+  GET  /health             — Cloud Run health probe
+"""
+
+import asyncio
+import json
+import os
+from concurrent.futures import ThreadPoolExecutor
+
+import anthropic
+from dotenv import load_dotenv
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from openai import OpenAI
+from pydantic import BaseModel
+
+load_dotenv()
+
+from translator.pipeline import run, _translate_with_context  # noqa: E402
+from translator.transcriber import transcribe  # noqa: E402
+
+app = FastAPI(title="Translator API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+_executor = ThreadPoolExecutor(max_workers=4)
+
+LANGUAGE_NAMES = {
+    "ja": "Japanese", "ko": "Korean", "zh": "Chinese",
+    "es": "Spanish", "fr": "French", "de": "German",
+    "pt": "Portuguese", "it": "Italian", "ru": "Russian", "ar": "Arabic",
+}
+
+MODEL_ALIASES = {
+    "sonnet": "claude-sonnet-4-6",
+    "opus": "claude-opus-4-8",
+    "haiku": "claude-haiku-4-5",
+}
+
+
+# ── REST ─────────────────────────────────────────────────────────────────────
+
+class TranslateRequest(BaseModel):
+    text: str
+    model: str = "sonnet"
+    source_lang: str = "ja"
+    context: str = ""
+
+
+@app.get("/health")
+async def health():
+    return {"ok": True}
+
+
+@app.post("/translate")
+async def translate_text(req: TranslateRequest):
+    model = MODEL_ALIASES.get(req.model.lower(), req.model)
+    lang_name = LANGUAGE_NAMES.get(req.source_lang.lower(), req.source_lang.upper())
+
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        _executor,
+        lambda: run(req.text.strip(), model=model, source_lang=req.source_lang,
+                    lang_name=lang_name, context=req.context),
+    )
+    return {
+        "source_text": result.source_text,
+        "english_text": result.english_text,
+        "translator_notes": result.translator_notes,
+        "analysis": {
+            "domain": result.analysis.domain,
+            "formality_level": result.analysis.formality_level,
+            "has_honorifics": result.analysis.has_honorifics,
+            "cultural_notes": result.analysis.cultural_notes,
+            "implicit_subjects": result.analysis.implicit_subjects,
+        },
+    }
+
+
+# ── WebSocket — conversation mode ────────────────────────────────────────────
+
+@app.websocket("/ws/conversation")
+async def ws_conversation(ws: WebSocket):
+    await ws.accept()
+
+    # First frame must be a JSON config text frame
+    try:
+        raw = await asyncio.wait_for(ws.receive_text(), timeout=10)
+        cfg = json.loads(raw)
+    except Exception:
+        await ws.close(code=1008)
+        return
+
+    model = MODEL_ALIASES.get(cfg.get("model", "sonnet").lower(), cfg.get("model", "sonnet"))
+    source_lang = cfg.get("source_lang", "ja")
+    lang_name = LANGUAGE_NAMES.get(source_lang.lower(), source_lang.upper())
+    context = cfg.get("context", "")
+
+    anthropic_client = anthropic.Anthropic()
+    openai_client = OpenAI()
+    source_history: list[str] = []
+    loop = asyncio.get_event_loop()
+
+    try:
+        while True:
+            # Receive binary audio frame (WAV bytes from browser MediaRecorder)
+            data = await ws.receive_bytes()
+
+            # Run transcription + translation in thread pool (blocking SDK calls)
+            def process(wav_bytes: bytes) -> dict:
+                prompt = source_history[-1] if source_history else ""
+                text = transcribe(wav_bytes, openai_client, prompt=prompt, source_lang=source_lang)
+                if not text.strip():
+                    return {"skipped": True}
+                source_history.append(text)
+                english = _translate_with_context(
+                    text, source_history, anthropic_client,
+                    model=model, lang_name=lang_name, context=context,
+                )
+                return {"source": text, "english": english or ""}
+
+            result = await loop.run_in_executor(_executor, process, data)
+
+            if result.get("skipped"):
+                await ws.send_text(json.dumps({"skipped": True}))
+            else:
+                await ws.send_text(json.dumps({
+                    "source": result["source"],
+                    "english": result["english"],
+                    "lang_tag": source_lang.upper(),
+                }))
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        try:
+            await ws.send_text(json.dumps({"error": str(exc)}))
+        except Exception:
+            pass
+
+
+# ── Static frontend (dev convenience) ────────────────────────────────────────
+
+_frontend = os.path.join(os.path.dirname(__file__), "frontend")
+if os.path.isdir(_frontend):
+    app.mount("/", StaticFiles(directory=_frontend, html=True), name="frontend")
