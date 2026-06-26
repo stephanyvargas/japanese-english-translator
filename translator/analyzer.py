@@ -43,8 +43,10 @@ def analyze(
     model: str = "claude-sonnet-4-6",
     source_lang: str = "ja",
     lang_name: str = "Japanese",
+    context: str = "",
 ) -> AnalysisResult:
     """Run a linguistic analysis pass on the source text."""
+    context_line = f"Context: {context}\n\n" if context else ""
     with client.messages.stream(
         model=model,
         max_tokens=1024,
@@ -52,7 +54,7 @@ def analyze(
         tools=[_TOOL],
         tool_choice={"type": "tool", "name": "submit_analysis"},
         messages=[
-            {"role": "user", "content": f"Analyze this {lang_name} text:\n\n{source_text}"}
+            {"role": "user", "content": f"{context_line}Analyze this {lang_name} text:\n\n{source_text}"}
         ],
     ) as stream:
         msg = stream.get_final_message()
