@@ -70,6 +70,9 @@ def main() -> None:
                         help="Model: sonnet (default), opus, haiku, or a full model ID")
     parser.add_argument("--source-lang", "-l", default="ja", metavar="LANG",
                         help="Source language ISO code, e.g. ja, ko, zh, es, fr (default: ja)")
+    parser.add_argument("--context", "-c", default="", metavar="TEXT",
+                        help="Optional setting description to guide translation "
+                             "(e.g. 'business meeting', 'medical consultation', 'bank appointment')")
     parser.add_argument("--interval", type=int, default=8, metavar="SECS",
                         help="Processing interval in conversation mode (default: 8)")
     args = parser.parse_args()
@@ -78,15 +81,19 @@ def main() -> None:
     source_lang = args.source_lang.lower()
     lang_name = resolve_lang_name(source_lang)
 
-    print(f"Model: {model} | Language: {lang_name} -> English", flush=True)
+    context = args.context.strip()
+    context_label = f" | Context: {context}" if context else ""
+    print(f"Model: {model} | Language: {lang_name} -> English{context_label}", flush=True)
 
     try:
         if args.text:
-            result = run(args.text.strip(), model=model, source_lang=source_lang, lang_name=lang_name)
+            result = run(args.text.strip(), model=model, source_lang=source_lang,
+                         lang_name=lang_name, context=context)
             _print_result(result, args.notes)
 
         elif args.once:
-            result = run_from_mic(model=model, source_lang=source_lang, lang_name=lang_name)
+            result = run_from_mic(model=model, source_lang=source_lang, lang_name=lang_name,
+                                  context=context)
             _print_result(result, args.notes)
 
         else:
@@ -95,6 +102,7 @@ def main() -> None:
                 model=model,
                 source_lang=source_lang,
                 lang_name=lang_name,
+                context=context,
             )
 
     except KeyboardInterrupt:
