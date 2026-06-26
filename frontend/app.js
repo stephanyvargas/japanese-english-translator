@@ -110,21 +110,33 @@ translateBtn.addEventListener('click', async () => {
 // AudioContext (which handles all of them) then repack as WAV so Whisper always
 // receives a format it can decode.
 
-// Reuse a single AudioContext — browsers cap how many can exist at once.
-let _audioCtx = null;
-function getAudioCtx() {
-  if (!_audioCtx || _audioCtx.state === 'closed') {
-    _audioCtx = new AudioContext({ sampleRate: 16000 });
-  }
-  return _audioCtx;
+// Reuse a decode context. sampleRate is intentionally omitted here — we do
+// the resampling explicitly with OfflineAudioContext so it is guaranteed.
+let _decodeCtx = null;
+function getDecodeCtx() {
+  if (!_decodeCtx || _decodeCtx.state === 'closed') _decodeCtx = new AudioContext();
+  return _decodeCtx;
 }
 
-// Returns an ArrayBuffer (WAV) or null if the chunk is too short to send.
+// Returns an ArrayBuffer (16kHz mono WAV) or null if the chunk is too short.
 async function blobToWav(blob) {
   const arrayBuffer = await blob.arrayBuffer();
-  const audioBuffer = await getAudioCtx().decodeAudioData(arrayBuffer);
-  if (audioBuffer.duration < 0.5) return null; // Whisper rejects sub-second clips
-  return audioBufferToWav(audioBuffer);
+
+  // Step 1: decode whatever format MediaRecorder produced
+  const decoded = await getDecodeCtx().decodeAudioData(arrayBuffer);
+  if (decoded.duration < 0.5) return null; // Whisper rejects sub-second clips
+
+  // Step 2: resample to 16kHz mono via OfflineAudioContext
+  const TARGET_RATE = 16000;
+  const numFrames = Math.ceil(decoded.duration * TARGET_RATE);
+  const offline = new OfflineAudioContext(1, numFrames, TARGET_RATE);
+  const src = offline.createBufferSource();
+  src.buffer = decoded;
+  src.connect(offline.destination);
+  src.start(0);
+  const resampled = await offline.startRendering();
+
+  return audioBufferToWav(resampled);
 }
 
 function audioBufferToWav(buffer) {
