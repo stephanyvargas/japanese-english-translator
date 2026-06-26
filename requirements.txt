@@ -5,3 +5,6 @@ scipy
 numpy
 pydantic
 python-dotenv
+fastapi
+uvicorn[standard]
+websockets
