@@ -4,7 +4,7 @@ from pydantic import BaseModel
 class AnalysisResult(BaseModel):
     domain: str
     formality_level: str
-    has_keigo: bool
+    has_honorifics: bool
     cultural_notes: list[str]
     implicit_subjects: list[str]
 
@@ -17,7 +17,7 @@ class ReviewResult(BaseModel):
 
 
 class FinalOutput(BaseModel):
-    japanese_source: str
+    source_text: str
     english_text: str
     translator_notes: list[str]
     analysis: AnalysisResult
