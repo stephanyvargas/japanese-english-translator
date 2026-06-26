@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Language → English Translator</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>Language &rarr; English Translator</h1>
+      <p class="subtitle">Powered by Claude + Whisper</p>
+    </header>
+
+    <section class="controls">
+      <div class="control-row">
+        <label>
+          Language
+          <select id="sourceLang">
+            <option value="ja">Japanese</option>
+            <option value="ko">Korean</option>
+            <option value="zh">Chinese</option>
+            <option value="es">Spanish</option>
+            <option value="fr">French</option>
+            <option value="de">German</option>
+            <option value="pt">Portuguese</option>
+            <option value="it">Italian</option>
+            <option value="ru">Russian</option>
+            <option value="ar">Arabic</option>
+          </select>
+        </label>
+        <label>
+          Model
+          <select id="model">
+            <option value="sonnet">Sonnet (balanced)</option>
+            <option value="opus">Opus (highest quality)</option>
+            <option value="haiku">Haiku (fastest)</option>
+          </select>
+        </label>
+      </div>
+      <div class="control-row">
+        <label class="full-width">
+          Context <span class="hint">(optional — e.g. "business meeting", "bank appointment")</span>
+          <input type="text" id="context" placeholder="Describe the setting..." />
+        </label>
+      </div>
+      <div class="control-row">
+        <label>
+          Backend URL
+          <input type="text" id="backendUrl" value="http://localhost:8000" />
+        </label>
+      </div>
+    </section>
+
+    <section class="tabs">
+      <button class="tab active" data-tab="conversation">Conversation</button>
+      <button class="tab" data-tab="text">Type text</button>
+    </section>
+
+    <!-- Conversation mode -->
+    <section class="panel" id="panel-conversation">
+      <p class="hint">The mic records in ~8-second chunks and streams translations as you speak.</p>
+      <div class="btn-row">
+        <button id="startBtn" class="btn btn-primary">&#9679; Start</button>
+        <button id="stopBtn" class="btn btn-danger" disabled>&#9632; Stop</button>
+        <span id="convStatus" class="status"></span>
+      </div>
+    </section>
+
+    <!-- Text mode -->
+    <section class="panel hidden" id="panel-text">
+      <textarea id="textInput" rows="4" placeholder="Paste or type text here..."></textarea>
+      <div class="btn-row">
+        <button id="translateBtn" class="btn btn-primary">Translate</button>
+        <label class="checkbox-label">
+          <input type="checkbox" id="showNotes" /> Show translator notes
+        </label>
+        <span id="textStatus" class="status"></span>
+      </div>
+    </section>
+
+    <!-- Output -->
+    <section class="output-section">
+      <div class="output-header">
+        <span>Output</span>
+        <button id="clearBtn" class="btn btn-small">Clear</button>
+      </div>
+      <div id="output" class="output"></div>
+    </section>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
