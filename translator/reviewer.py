@@ -40,12 +40,15 @@ def review(
     client: anthropic.Anthropic,
     model: str = "claude-sonnet-4-6",
     lang_name: str = "Japanese",
+    context: str = "",
 ) -> ReviewResult:
     """Run a bilingual quality review on the translation."""
+    setting_line = f"Setting: {context}\n" if context else ""
     user_message = (
+        f"{setting_line}"
         f"Source ({lang_name}):\n{source_text}\n\n"
         f"Translation (English):\n{english_text}\n\n"
-        f"Context: domain={analysis.domain}, formality={analysis.formality_level}, "
+        f"Linguistic context: domain={analysis.domain}, formality={analysis.formality_level}, "
         f"has_honorifics={analysis.has_honorifics}"
     )
     if analysis.cultural_notes:
