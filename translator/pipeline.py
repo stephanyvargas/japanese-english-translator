@@ -45,10 +45,13 @@ def _translate_with_context(
 
     user_msg = f"{context_block}NEW chunk to translate:\n{new_source}"
 
+    # No adaptive thinking here: this is a low-latency live interpreter call, not
+    # a deep-reasoning task. Plain generation keeps per-chunk latency under the
+    # recording cadence so the conversation does not fall behind. The full quality
+    # pipeline (analyze/translate/review with thinking) is used by run() instead.
     with client.messages.stream(
         model=model,
         max_tokens=512,
-        thinking={"type": "adaptive"},
         system=_get_conversation_system(lang_name, context),
         messages=[{"role": "user", "content": user_msg}],
     ) as stream:
