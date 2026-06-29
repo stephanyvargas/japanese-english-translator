@@ -37,14 +37,20 @@ function apiBase() {
   return backendUrl.value.replace(/\/$/, '');
 }
 
-function appendChunk({ source, english, langTag, notes, error }) {
+function nowStamp() {
+  return new Date().toLocaleTimeString('en-GB'); // HH:MM:SS
+}
+
+function appendChunk({ source, english, langTag, notes, error, lagMs }) {
   const div = document.createElement('div');
   div.className = 'chunk';
+  const ts = nowStamp();
+  const lag = lagMs != null ? ` (${(lagMs / 1000).toFixed(1)}s)` : '';
   if (error) {
-    div.innerHTML = `<span class="error">Error: ${escHtml(error)}</span>`;
+    div.innerHTML = `<span class="error">[${ts}] Error: ${escHtml(error)}</span>`;
   } else {
-    if (source) div.innerHTML += `<span class="source">[${escHtml(langTag || '??')}] ${escHtml(source)}</span>`;
-    if (english) div.innerHTML += `<span class="english">[EN] ${escHtml(english)}</span>`;
+    if (source) div.innerHTML += `<span class="source">[${ts}] [${escHtml(langTag || '??')}] ${escHtml(source)}</span>`;
+    if (english) div.innerHTML += `<span class="english">[EN]${lag} ${escHtml(english)}</span>`;
     if (notes && notes.length) {
       div.innerHTML += notes.map(n => `<span class="notes">* ${escHtml(n)}</span>`).join('');
     }
@@ -112,8 +118,37 @@ let ws = null;
 let active = false;
 const INTERVAL_MS = 8000;
 
+// Backpressure: only one chunk in flight at a time. The newest recorded chunk
+// waits in pendingChunk; if it's overwritten before being sent we count a drop.
+// This bounds lag to ~1 chunk so the conversation can never fall behind.
+let inFlight = false;
+let pendingChunk = null;
+let sentAt = 0;
+let dropped = 0;
+
 startBtn.addEventListener('click', startConversation);
 stopBtn.addEventListener('click', stopConversation);
+
+function setStatus() {
+  if (!active) { convStatus.textContent = 'Stopped'; return; }
+  const drop = dropped > 0 ? ` · dropped ${dropped}` : '';
+  if (inFlight) {
+    convStatus.innerHTML = `<span class="recording-dot"></span>Processing…${drop}`;
+  } else {
+    convStatus.innerHTML = `<span class="recording-dot"></span>Live${drop}`;
+  }
+}
+
+function trySend() {
+  if (inFlight || !pendingChunk) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const buf = pendingChunk;
+  pendingChunk = null;
+  inFlight = true;
+  sentAt = Date.now();
+  ws.send(buf);
+  setStatus();
+}
 
 async function startConversation() {
   try {
@@ -137,18 +172,35 @@ async function startConversation() {
 
   ws.onmessage = (evt) => {
     const msg = JSON.parse(evt.data);
-    if (msg.skipped) return;
-    if (msg.error) { appendChunk({ error: msg.error }); return; }
-    appendChunk({ source: msg.source, english: msg.english, langTag: sourceLang.value.toUpperCase() });
+    // Every server reply (including skips) clears the in-flight slot so the
+    // next pending chunk can go out.
+    inFlight = false;
+    const lagMs = sentAt ? Date.now() - sentAt : null;
+
+    if (msg.error) {
+      appendChunk({ error: msg.error });
+    } else if (!msg.skipped) {
+      appendChunk({
+        source: msg.source,
+        english: msg.english,
+        langTag: sourceLang.value.toUpperCase(),
+        lagMs,
+      });
+    }
+    setStatus();
+    trySend();
   };
 
   ws.onerror = () => { convStatus.textContent = 'WebSocket error'; };
   ws.onclose = () => { if (active) stopConversation(); };
 
   active = true;
+  inFlight = false;
+  pendingChunk = null;
+  dropped = 0;
   startBtn.disabled = true;
   stopBtn.disabled = false;
-  convStatus.innerHTML = '<span class="recording-dot"></span>Recording...';
+  setStatus();
 
   // Cycle stop/start so each recording is a complete, self-contained WebM file.
   // Using timeslice produces headerless continuation chunks that Whisper rejects.
@@ -163,8 +215,11 @@ function recordCycle() {
   rec.ondataavailable = async (e) => {
     if (!e.data || e.data.size === 0) return;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    convStatus.textContent = `Sent ${(e.data.size / 1024).toFixed(1)} KB — translating...`;
-    ws.send(await e.data.arrayBuffer());
+    // Newest-wins: if a chunk is already waiting, it's stale — drop it.
+    if (pendingChunk) dropped++;
+    pendingChunk = await e.data.arrayBuffer();
+    setStatus();
+    trySend();
   };
 
   rec.onstop = () => { if (active) recordCycle(); };
