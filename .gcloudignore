@@ -1,0 +1,17 @@
+# Files not uploaded to Cloud Build when running `gcloud run deploy --source .`
+.env
+.env.*
+__pycache__/
+*.pyc
+*.pyo
+.git/
+.gitignore
+.venv/
+venv/
+*.egg-info/
+.DS_Store
+
+# Firebase Hosting assets are deployed separately, not needed in the backend image
+frontend/
+firebase.json
+.firebaserc
