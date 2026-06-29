@@ -37,9 +37,14 @@ from translator.transcriber import transcribe  # noqa: E402
 
 app = FastAPI(title="Translator API")
 
+# Comma-separated origins via ALLOWED_ORIGINS env; falls back to "*" for local dev.
+# In production set e.g. ALLOWED_ORIGINS="https://PROJECT.web.app,https://PROJECT.firebaseapp.com"
+_origins_env = os.environ.get("ALLOWED_ORIGINS", "").strip()
+_allow_origins = [o.strip() for o in _origins_env.split(",") if o.strip()] or ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allow_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
