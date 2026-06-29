@@ -9,7 +9,9 @@ Exposes two surfaces:
 import asyncio
 import io
 import json
+import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import anthropic
@@ -22,6 +24,13 @@ from openai import OpenAI
 from pydantic import BaseModel
 
 load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("translator")
 
 from translator.pipeline import run, _translate_with_context  # noqa: E402
 from translator.transcriber import transcribe  # noqa: E402
@@ -48,6 +57,10 @@ MODEL_ALIASES = {
     "opus": "claude-opus-4-8",
     "haiku": "claude-haiku-4-5",
 }
+
+# Only the last N turns are sent to Claude per chunk — keeps latency flat as
+# the conversation grows (full history is still used for Whisper prompt continuity).
+MAX_HISTORY = 6
 
 
 def _to_wav(audio_bytes: bytes) -> bytes:
@@ -134,45 +147,71 @@ async def ws_conversation(ws: WebSocket):
     openai_client = OpenAI()
     source_history: list[str] = []
     loop = asyncio.get_event_loop()
+    seq = 0
+
+    log.info("WS connected | model=%s lang=%s context=%r", model, source_lang, context)
 
     try:
         while True:
             # Receive binary audio frame (WAV bytes from browser MediaRecorder)
             data = await ws.receive_bytes()
+            seq += 1
+            n = seq
 
             # Run transcription + translation in thread pool (blocking SDK calls)
             def process(raw_bytes: bytes) -> dict:
+                t0 = time.perf_counter()
                 if len(raw_bytes) < 1000:
+                    log.info("#%d skipped (%d bytes, too short)", n, len(raw_bytes))
                     return {"skipped": True}
                 try:
                     wav_bytes = _to_wav(raw_bytes)
-                except Exception:
+                except Exception as exc:
+                    log.info("#%d skipped (decode failed: %s)", n, exc)
                     return {"skipped": True}
+                t1 = time.perf_counter()
+
                 prompt = source_history[-1] if source_history else ""
                 text = transcribe(wav_bytes, openai_client, prompt=prompt, source_lang=source_lang)
+                t2 = time.perf_counter()
                 if not text.strip():
+                    log.info("#%d skipped (no speech) | wav %dms | stt %dms",
+                             n, (t1 - t0) * 1000, (t2 - t1) * 1000)
                     return {"skipped": True}
+
                 source_history.append(text)
                 english = _translate_with_context(
-                    text, source_history, anthropic_client,
+                    text, source_history[-MAX_HISTORY:], anthropic_client,
                     model=model, lang_name=lang_name, context=context,
                 )
-                return {"source": text, "english": english or ""}
+                t3 = time.perf_counter()
+
+                total_ms = int((t3 - t0) * 1000)
+                log.info(
+                    "#%d recv %d bytes | wav %dms | stt %dms %r | mt %dms %r | total %dms",
+                    n, len(raw_bytes), (t1 - t0) * 1000, (t2 - t1) * 1000, text[:40],
+                    (t3 - t2) * 1000, (english or "")[:40], total_ms,
+                )
+                return {"source": text, "english": english or "", "ms": total_ms}
 
             result = await loop.run_in_executor(_executor, process, data)
 
             if result.get("skipped"):
-                await ws.send_text(json.dumps({"skipped": True}))
+                await ws.send_text(json.dumps({"skipped": True, "seq": n}))
             else:
                 await ws.send_text(json.dumps({
                     "source": result["source"],
                     "english": result["english"],
                     "lang_tag": source_lang.upper(),
+                    "seq": n,
+                    "ts": time.time(),
+                    "ms": result["ms"],
                 }))
 
     except WebSocketDisconnect:
-        pass
+        log.info("WS disconnected after %d chunks", seq)
     except Exception as exc:
+        log.exception("WS error: %s", exc)
         try:
             await ws.send_text(json.dumps({"error": str(exc)}))
         except Exception:
