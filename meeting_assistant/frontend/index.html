@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Meeting Assistant</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>Meeting Assistant</h1>
+      <p class="subtitle">Research &amp; question helper for Japanese meetings &middot; Google search via Serper</p>
+    </header>
+
+    <section class="controls">
+      <div class="control-row">
+        <label>
+          Model
+          <select id="model">
+            <option value="sonnet">Sonnet (balanced)</option>
+            <option value="opus">Opus (highest quality)</option>
+            <option value="haiku">Haiku (fastest)</option>
+          </select>
+        </label>
+        <label>
+          Backend URL
+          <input type="text" id="backendUrl" value="http://localhost:8001" />
+        </label>
+      </div>
+      <details class="context-box">
+        <summary>Meeting context / transcript (optional)</summary>
+        <textarea id="context" rows="4"
+          placeholder="Paste meeting notes or transcript here to ground answers and tailor questions..."></textarea>
+      </details>
+    </section>
+
+    <section class="chat" id="chat"></section>
+
+    <section class="composer">
+      <textarea id="message" rows="2"
+        placeholder="Ask me to research something, find info, or suggest questions to ask..."></textarea>
+      <div class="composer-actions">
+        <button id="sendBtn" class="btn btn-primary">Send</button>
+        <button id="clearBtn" class="btn btn-small">Clear</button>
+        <span id="status" class="status"></span>
+      </div>
+    </section>
+
+    <div class="examples">
+      <span>Try:</span>
+      <button class="chip" data-q="Find recent news about Toyota's EV strategy">recent news about a company</button>
+      <button class="chip" data-q="Suggest 3 polite questions to ask a vendor about their pricing and contract terms">suggest meeting questions</button>
+      <button class="chip" data-q="What is the current USD to JPY exchange rate?">a quick fact</button>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
