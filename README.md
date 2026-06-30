@@ -61,6 +61,62 @@ python3 main.py --model haiku    # claude-haiku-4-5 — fastest, cheapest
 
 Full model IDs are also accepted: `--model claude-sonnet-4-6`.
 
+## Web app
+
+The same engine is exposed as a browser app: a FastAPI backend (`server.py`) and a
+static frontend (`frontend/`). The browser captures the mic and streams audio to the
+backend over a WebSocket; transcription and translation run server-side.
+
+```bash
+# Run the backend locally (serves the frontend at http://localhost:8000 too)
+uvicorn server:app --reload --port 8000
+```
+
+- `POST /translate` — full quality pipeline for typed text
+- `WS /ws/conversation` — real-time conversation mode (audio in, translations out)
+- `GET /health` — health probe
+
+## Deployment
+
+The app is deployed with the **frontend on Firebase Hosting** and the **backend on
+Google Cloud Run** (region `asia-northeast1`). API keys are stored in Google Secret
+Manager, not in the image.
+
+| Surface | URL |
+|---------|-----|
+| App (frontend) | https://japanese-translator-501010.web.app |
+| Backend API | https://translator-backend-1029193548741.asia-northeast1.run.app |
+
+**Notes**
+
+- The browser connects directly to the Cloud Run URL for the WebSocket (`wss://`).
+  Firebase Hosting does not proxy WebSocket upgrades, so the frontend's *Backend URL*
+  field points straight at Cloud Run.
+- The backend's allowed CORS origins are set via the `ALLOWED_ORIGINS` env var
+  (comma-separated); in production it is set to the Firebase Hosting domains.
+- Cloud Run scales to zero, so the first request after idle has a few-second cold
+  start. Add `--min-instances 1` to keep one warm.
+
+### Redeploy
+
+```bash
+# Backend → Cloud Run (rebuilds the container from the Dockerfile)
+gcloud run deploy translator-backend \
+  --source . \
+  --region asia-northeast1 \
+  --allow-unauthenticated \
+  --timeout 3600 \
+  --memory 1Gi \
+  --set-secrets ANTHROPIC_API_KEY=anthropic-api-key:latest,OPENAI_API_KEY=openai-api-key:latest \
+  --set-env-vars "^|^ALLOWED_ORIGINS=https://japanese-translator-501010.web.app,https://japanese-translator-501010.firebaseapp.com"
+
+# Frontend → Firebase Hosting
+firebase deploy --only hosting
+
+# Tail backend logs (timestamped per-chunk timing)
+gcloud run services logs read translator-backend --region asia-northeast1 --limit 50
+```
+
 ## Project structure
 
 ```
