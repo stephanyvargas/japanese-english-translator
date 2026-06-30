@@ -1,5 +1,17 @@
 {
   "projects": {
     "default": "japanese-translator-501010"
+  },
+  "targets": {
+    "japanese-translator-501010": {
+      "hosting": {
+        "translator": [
+          "japanese-translator-501010"
+        ],
+        "assistant": [
+          "japanese-meeting-assistant"
+        ]
+      }
+    }
   }
 }

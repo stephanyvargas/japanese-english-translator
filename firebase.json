@@ -1,9 +1,20 @@
 {
-  "hosting": {
-    "public": "frontend",
-    "ignore": ["firebase.json", "**/.*"],
-    "rewrites": [
-      { "source": "**", "destination": "/index.html" }
-    ]
-  }
+  "hosting": [
+    {
+      "target": "translator",
+      "public": "frontend",
+      "ignore": ["firebase.json", "**/.*"],
+      "rewrites": [
+        { "source": "**", "destination": "/index.html" }
+      ]
+    },
+    {
+      "target": "assistant",
+      "public": "meeting_assistant/frontend",
+      "ignore": ["firebase.json", "**/.*"],
+      "rewrites": [
+        { "source": "**", "destination": "/index.html" }
+      ]
+    }
+  ]
 }
