@@ -1,47 +1,56 @@
-"""Google search via the Serper API (https://serper.dev)."""
+"""Google search via the SerpApi API (https://serpapi.com)."""
 
 import os
 
 import httpx
 
-_SERPER_URL = "https://google.serper.dev/search"
+_SERPAPI_URL = "https://serpapi.com/search"
 
 
 def google_search(query: str, num: int = 6, gl: str = "jp", hl: str = "ja") -> list[dict]:
-    """Run a Google search through Serper and return simplified organic results.
+    """Run a Google search through SerpApi and return simplified organic results.
 
     gl = geolocation country, hl = interface language. Defaults lean Japanese
     since this assists Japanese meetings, but English queries work fine too.
     """
-    api_key = os.environ.get("SERPER_API_KEY")
+    api_key = os.environ.get("SERPAPI_API_KEY")
     if not api_key:
-        raise RuntimeError("SERPER_API_KEY is not set")
+        raise RuntimeError("SERPAPI_API_KEY is not set")
 
-    resp = httpx.post(
-        _SERPER_URL,
-        headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
-        json={"q": query, "num": num, "gl": gl, "hl": hl},
-        timeout=20,
+    resp = httpx.get(
+        _SERPAPI_URL,
+        params={
+            "engine": "google",
+            "q": query,
+            "num": num,
+            "gl": gl,
+            "hl": hl,
+            "api_key": api_key,
+        },
+        timeout=30,
     )
     resp.raise_for_status()
     data = resp.json()
+    if data.get("error"):
+        raise RuntimeError(f"SerpApi error: {data['error']}")
 
     results = []
-    for item in data.get("organic", [])[:num]:
+
+    # Answer box / featured snippet, when present, is high-signal — surface it first.
+    if answer := data.get("answer_box"):
+        snippet = answer.get("answer") or answer.get("snippet") or ""
+        if snippet:
+            results.append({
+                "title": answer.get("title", "Answer"),
+                "link": answer.get("link", ""),
+                "snippet": snippet,
+            })
+
+    for item in data.get("organic_results", [])[:num]:
         results.append({
             "title": item.get("title", ""),
             "link": item.get("link", ""),
             "snippet": item.get("snippet", ""),
         })
-
-    # Serper's answer box / knowledge graph, when present, is high-signal.
-    if answer := data.get("answerBox"):
-        snippet = answer.get("answer") or answer.get("snippet") or ""
-        if snippet:
-            results.insert(0, {
-                "title": answer.get("title", "Answer box"),
-                "link": answer.get("link", ""),
-                "snippet": snippet,
-            })
 
     return results
