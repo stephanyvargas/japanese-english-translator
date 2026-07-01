@@ -3,6 +3,8 @@
 const sourceLang   = document.getElementById('sourceLang');
 const modelSel     = document.getElementById('model');
 const contextInput = document.getElementById('context');
+const glossaryEl   = document.getElementById('glossary');
+const verifyEl     = document.getElementById('verify');
 const backendUrl   = document.getElementById('backendUrl');
 
 const tabs         = document.querySelectorAll('.tab');
@@ -85,6 +87,8 @@ translateBtn.addEventListener('click', async () => {
         model: modelSel.value,
         source_lang: sourceLang.value,
         context: contextInput.value.trim(),
+        glossary: glossaryEl.value.trim(),
+        verify: verifyEl.checked,
       }),
     });
 
@@ -116,7 +120,21 @@ translateBtn.addEventListener('click', async () => {
 let activeStream = null;
 let ws = null;
 let active = false;
-const INTERVAL_MS = 8000;
+
+// Voice-activity segmentation: end a chunk on a natural pause instead of a blind
+// timer, so sentences aren't sliced mid-word (the main cause of misheard STT).
+const VAD = {
+  POLL_MS: 100,        // how often we sample loudness
+  RMS_THRESHOLD: 0.015, // above this = speech
+  SILENCE_MS: 700,     // sustained silence after speech ends a chunk
+  MIN_SPEECH_MS: 300,  // require this much speech before a pause counts
+  MAX_MS: 14000,       // hard cap so one long utterance still gets sent
+};
+
+// WebAudio nodes for loudness metering (set up in startConversation).
+let audioCtx = null;
+let analyser = null;
+let vadBuf = null;
 
 // Backpressure: only one chunk in flight at a time. The newest recorded chunk
 // waits in pendingChunk; if it's overwritten before being sent we count a drop.
@@ -158,6 +176,15 @@ async function startConversation() {
     return;
   }
 
+  // Loudness meter for pause detection. The analyser only reads the signal — it
+  // is not connected to the destination, so there's no audio feedback.
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const src = audioCtx.createMediaStreamSource(activeStream);
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 1024;
+  vadBuf = new Uint8Array(analyser.fftSize);
+  src.connect(analyser);
+
   const wsUrl = apiBase().replace(/^http/, 'ws') + '/ws/conversation';
   ws = new WebSocket(wsUrl);
 
@@ -167,6 +194,7 @@ async function startConversation() {
       source_lang: sourceLang.value,
       lang_name: sourceLang.options[sourceLang.selectedIndex].text,
       context: contextInput.value.trim(),
+      glossary: glossaryEl.value.trim(),
     }));
   };
 
@@ -207,14 +235,32 @@ async function startConversation() {
   recordCycle();
 }
 
+// Root-mean-square loudness of the current mic frame, 0..~1.
+function currentRms() {
+  if (!analyser) return 0;
+  analyser.getByteTimeDomainData(vadBuf);
+  let sum = 0;
+  for (let i = 0; i < vadBuf.length; i++) {
+    const v = (vadBuf[i] - 128) / 128;
+    sum += v * v;
+  }
+  return Math.sqrt(sum / vadBuf.length);
+}
+
 function recordCycle() {
   if (!active || !activeStream) return;
 
   const rec = new MediaRecorder(activeStream);
+  let sawSpeech = false;
+  let speechMs = 0;
+  let silenceMs = 0;
+  let elapsed = 0;
 
   rec.ondataavailable = async (e) => {
     if (!e.data || e.data.size === 0) return;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    // Silence-only window — nothing worth transcribing, don't send.
+    if (!sawSpeech) return;
     // Newest-wins: if a chunk is already waiting, it's stale — drop it.
     if (pendingChunk) dropped++;
     pendingChunk = await e.data.arrayBuffer();
@@ -222,10 +268,24 @@ function recordCycle() {
     trySend();
   };
 
-  rec.onstop = () => { if (active) recordCycle(); };
+  rec.onstop = () => { clearInterval(monitor); if (active) recordCycle(); };
+
+  // Cut the recording on a sustained pause after speech, or at the hard cap.
+  const monitor = setInterval(() => {
+    if (rec.state !== 'recording') return;
+    elapsed += VAD.POLL_MS;
+    if (currentRms() >= VAD.RMS_THRESHOLD) {
+      sawSpeech = true;
+      speechMs += VAD.POLL_MS;
+      silenceMs = 0;
+    } else {
+      silenceMs += VAD.POLL_MS;
+    }
+    const pauseEnded = sawSpeech && speechMs >= VAD.MIN_SPEECH_MS && silenceMs >= VAD.SILENCE_MS;
+    if (pauseEnded || elapsed >= VAD.MAX_MS) rec.stop();
+  }, VAD.POLL_MS);
 
   rec.start();
-  setTimeout(() => { if (rec.state === 'recording') rec.stop(); }, INTERVAL_MS);
 }
 
 function stopConversation() {
@@ -234,6 +294,7 @@ function stopConversation() {
     activeStream.getTracks().forEach(t => t.stop());
     activeStream = null;
   }
+  if (audioCtx) { audioCtx.close(); audioCtx = null; analyser = null; vadBuf = null; }
   if (ws) { ws.close(); ws = null; }
   startBtn.disabled = false;
   stopBtn.disabled = true;
