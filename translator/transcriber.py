@@ -13,17 +13,19 @@ _COMPRESSION_RATIO_THRESHOLD = 2.4
 DEFAULT_STT_MODEL = "gpt-4o-transcribe"
 
 # Phrases the models emit from silence/music/outro noise rather than real speech.
-# A transcript that is *only* one of these is dropped. Kept short and exact.
+# A transcript that is *only* one of these is dropped. Kept to unambiguous
+# video-outro artifacts — NOT bare politeness like "ありがとうございました" or
+# "おやすみなさい", which are legitimate things a speaker actually says.
 _HALLUCINATION_PHRASES = {
     "ご視聴ありがとうございました",
     "ご視聴ありがとうございます",
     "最後までご視聴いただきありがとうございます",
     "チャンネル登録をお願いします",
-    "おやすみなさい",
-    "ありがとうございました",
+    "ご覧いただきありがとうございます",
     "thanks for watching",
     "thank you for watching",
     "please subscribe",
+    "like and subscribe",
 }
 
 
