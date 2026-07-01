@@ -45,6 +45,14 @@
           <input type="text" id="context" placeholder="Describe the setting..." />
         </label>
       </div>
+      <details class="control-row">
+        <summary>Key terms / names <span class="hint">(optional — pins how names &amp; jargon are rendered)</span></summary>
+        <textarea id="glossary" rows="3"
+          placeholder="One per line:&#10;田中 => Tanaka&#10;弊社 => our company&#10;ROE"></textarea>
+        <label class="checkbox-label">
+          <input type="checkbox" id="verify" /> Verify with back-translation (text mode, slower/higher quality)
+        </label>
+      </details>
       <div class="control-row">
         <label>
           Backend URL
@@ -60,7 +68,7 @@
 
     <!-- Conversation mode -->
     <section class="panel" id="panel-conversation">
-      <p class="hint">The mic records in ~8-second chunks and streams translations as you speak.</p>
+      <p class="hint">The mic segments on natural pauses and streams translations as you speak.</p>
       <div class="btn-row">
         <button id="startBtn" class="btn btn-primary">&#9679; Start</button>
         <button id="stopBtn" class="btn btn-danger" disabled>&#9632; Stop</button>

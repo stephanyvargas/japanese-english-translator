@@ -32,8 +32,9 @@ logging.basicConfig(
 )
 log = logging.getLogger("translator")
 
+from translator.glossary import Glossary  # noqa: E402
 from translator.pipeline import run, _translate_with_context  # noqa: E402
-from translator.transcriber import transcribe  # noqa: E402
+from translator.transcriber import DEFAULT_STT_MODEL, transcribe  # noqa: E402
 
 app = FastAPI(title="Translator API")
 
@@ -97,6 +98,8 @@ class TranslateRequest(BaseModel):
     model: str = "sonnet"
     source_lang: str = "ja"
     context: str = ""
+    glossary: str = ""      # free-text "term => rendering" lines, one per line
+    verify: bool = False    # opt-in back-translation drift check
 
 
 @app.get("/health")
@@ -108,12 +111,14 @@ async def health():
 async def translate_text(req: TranslateRequest):
     model = MODEL_ALIASES.get(req.model.lower(), req.model)
     lang_name = LANGUAGE_NAMES.get(req.source_lang.lower(), req.source_lang.upper())
+    glossary = Glossary.parse(req.glossary).format_for_prompt()
 
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(
         _executor,
         lambda: run(req.text.strip(), model=model, source_lang=req.source_lang,
-                    lang_name=lang_name, context=req.context),
+                    lang_name=lang_name, context=req.context,
+                    glossary=glossary, verify=req.verify),
     )
     return {
         "source_text": result.source_text,
@@ -147,6 +152,11 @@ async def ws_conversation(ws: WebSocket):
     source_lang = cfg.get("source_lang", "ja")
     lang_name = LANGUAGE_NAMES.get(source_lang.lower(), source_lang.upper())
     context = cfg.get("context", "")
+    stt_model = cfg.get("stt_model", DEFAULT_STT_MODEL)
+
+    glossary = Glossary.parse(cfg.get("glossary", ""))
+    glossary_stt = glossary.format_for_stt()
+    glossary_prompt = glossary.format_for_prompt()
 
     anthropic_client = anthropic.Anthropic()
     openai_client = OpenAI()
@@ -154,7 +164,8 @@ async def ws_conversation(ws: WebSocket):
     loop = asyncio.get_event_loop()
     seq = 0
 
-    log.info("WS connected | model=%s lang=%s context=%r", model, source_lang, context)
+    log.info("WS connected | model=%s stt=%s lang=%s context=%r terms=%d",
+             model, stt_model, source_lang, context, len(glossary))
 
     try:
         while True:
@@ -177,7 +188,8 @@ async def ws_conversation(ws: WebSocket):
                 t1 = time.perf_counter()
 
                 prompt = source_history[-1] if source_history else ""
-                text = transcribe(wav_bytes, openai_client, prompt=prompt, source_lang=source_lang)
+                text = transcribe(wav_bytes, openai_client, prompt=prompt,
+                                  source_lang=source_lang, model=stt_model, glossary=glossary_stt)
                 t2 = time.perf_counter()
                 if not text.strip():
                     log.info("#%d skipped (no speech) | wav %dms | stt %dms",
@@ -185,17 +197,17 @@ async def ws_conversation(ws: WebSocket):
                     return {"skipped": True}
 
                 source_history.append(text)
-                english = _translate_with_context(
+                english, repaired = _translate_with_context(
                     text, source_history[-MAX_HISTORY:], anthropic_client,
-                    model=model, lang_name=lang_name, context=context,
+                    model=model, lang_name=lang_name, context=context, glossary=glossary_prompt,
                 )
                 t3 = time.perf_counter()
 
                 total_ms = int((t3 - t0) * 1000)
                 log.info(
-                    "#%d recv %d bytes | wav %dms | stt %dms %r | mt %dms %r | total %dms",
+                    "#%d recv %d bytes | wav %dms | stt %dms %r | mt %dms%s %r | total %dms",
                     n, len(raw_bytes), (t1 - t0) * 1000, (t2 - t1) * 1000, text[:40],
-                    (t3 - t2) * 1000, (english or "")[:40], total_ms,
+                    (t3 - t2) * 1000, " repaired" if repaired else "", (english or "")[:40], total_ms,
                 )
                 return {"source": text, "english": english or "", "ms": total_ms}
 

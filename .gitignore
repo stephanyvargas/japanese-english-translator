@@ -6,3 +6,6 @@ dist/
 build/
 .venv/
 venv/
+
+# Firebase deploy cache
+.firebase/
