@@ -5,6 +5,8 @@ const modelSel     = document.getElementById('model');
 const contextInput = document.getElementById('context');
 const glossaryEl   = document.getElementById('glossary');
 const verifyEl     = document.getElementById('verify');
+const participantsEl = document.getElementById('participants');
+const diarizeEl    = document.getElementById('diarize');
 const backendUrl   = document.getElementById('backendUrl');
 
 const tabs         = document.querySelectorAll('.tab');
@@ -43,7 +45,17 @@ function nowStamp() {
   return new Date().toLocaleTimeString('en-GB'); // HH:MM:SS
 }
 
-function appendChunk({ source, english, langTag, notes, error, lagMs }) {
+// Stable per-speaker color, assigned in first-appearance order.
+const speakerColors = ['#4a9dff', '#4ecb7a', '#e0a13a', '#c471d6', '#e0655a', '#3ec3c3'];
+const speakerIndex = {};
+function speakerTag(speaker) {
+  if (!speaker) return '';
+  if (!(speaker in speakerIndex)) speakerIndex[speaker] = Object.keys(speakerIndex).length;
+  const color = speakerColors[speakerIndex[speaker] % speakerColors.length];
+  return `<span class="speaker" style="color:${color}">${escHtml(speaker)}</span> `;
+}
+
+function appendChunk({ source, english, langTag, speaker, notes, error, lagMs }) {
   const div = document.createElement('div');
   div.className = 'chunk';
   const ts = nowStamp();
@@ -51,7 +63,7 @@ function appendChunk({ source, english, langTag, notes, error, lagMs }) {
   if (error) {
     div.innerHTML = `<span class="error">[${ts}] Error: ${escHtml(error)}</span>`;
   } else {
-    if (source) div.innerHTML += `<span class="source">[${ts}] [${escHtml(langTag || '??')}] ${escHtml(source)}</span>`;
+    if (source) div.innerHTML += `<span class="source">[${ts}] ${speakerTag(speaker)}[${escHtml(langTag || '??')}] ${escHtml(source)}</span>`;
     if (english) div.innerHTML += `<span class="english">[EN]${lag} ${escHtml(english)}</span>`;
     if (notes && notes.length) {
       div.innerHTML += notes.map(n => `<span class="notes">* ${escHtml(n)}</span>`).join('');
@@ -195,6 +207,8 @@ async function startConversation() {
       lang_name: sourceLang.options[sourceLang.selectedIndex].text,
       context: contextInput.value.trim(),
       glossary: glossaryEl.value.trim(),
+      participants: participantsEl.value.trim(),
+      diarize: diarizeEl.checked,
     }));
   };
 
@@ -211,6 +225,7 @@ async function startConversation() {
       appendChunk({
         source: msg.source,
         english: msg.english,
+        speaker: msg.speaker,
         langTag: sourceLang.value.toUpperCase(),
         lagMs,
       });

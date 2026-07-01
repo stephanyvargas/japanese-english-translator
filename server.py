@@ -32,9 +32,13 @@ logging.basicConfig(
 )
 log = logging.getLogger("translator")
 
+from translator.diarizer import SpeakerBook, SpeakerEmbedder  # noqa: E402
 from translator.glossary import Glossary  # noqa: E402
 from translator.pipeline import run, _translate_with_context  # noqa: E402
 from translator.transcriber import DEFAULT_STT_MODEL, transcribe  # noqa: E402
+
+# Shared across connections — model/state is loaded once, embedding is stateless.
+_embedder = SpeakerEmbedder()
 
 app = FastAPI(title="Translator API")
 
@@ -158,14 +162,20 @@ async def ws_conversation(ws: WebSocket):
     glossary_stt = glossary.format_for_stt()
     glossary_prompt = glossary.format_for_prompt()
 
+    participants = cfg.get("participants", "")
+    diarize = bool(cfg.get("diarize", True))
+    names = [n.strip() for n in participants.splitlines() if n.strip()]
+    speaker_book = SpeakerBook(names=names)
+
     anthropic_client = anthropic.Anthropic()
     openai_client = OpenAI()
     source_history: list[str] = []
+    speaker_history: list[str] = []
     loop = asyncio.get_event_loop()
     seq = 0
 
-    log.info("WS connected | model=%s stt=%s lang=%s context=%r terms=%d",
-             model, stt_model, source_lang, context, len(glossary))
+    log.info("WS connected | model=%s stt=%s lang=%s context=%r terms=%d diarize=%s participants=%d",
+             model, stt_model, source_lang, context, len(glossary), diarize, len(names))
 
     try:
         while True:
@@ -196,20 +206,33 @@ async def ws_conversation(ws: WebSocket):
                              n, (t1 - t0) * 1000, (t2 - t1) * 1000)
                     return {"skipped": True}
 
+                # Diarization: one embedding per chunk (each chunk ≈ one turn).
+                speaker = ""
+                if diarize:
+                    try:
+                        emb = _embedder.embed(wav_bytes)
+                        if emb is not None:
+                            _, speaker = speaker_book.assign(emb)
+                    except Exception as exc:
+                        log.info("#%d diarize skipped (%s)", n, exc)
+
                 source_history.append(text)
+                speaker_history.append(speaker)
                 english, repaired = _translate_with_context(
                     text, source_history[-MAX_HISTORY:], anthropic_client,
                     model=model, lang_name=lang_name, context=context, glossary=glossary_prompt,
+                    speaker=speaker, speakers=speaker_history[-MAX_HISTORY:], participants=participants,
                 )
                 t3 = time.perf_counter()
 
                 total_ms = int((t3 - t0) * 1000)
                 log.info(
-                    "#%d recv %d bytes | wav %dms | stt %dms %r | mt %dms%s %r | total %dms",
+                    "#%d recv %d bytes | wav %dms | stt %dms %r | %s | mt %dms%s %r | total %dms",
                     n, len(raw_bytes), (t1 - t0) * 1000, (t2 - t1) * 1000, text[:40],
-                    (t3 - t2) * 1000, " repaired" if repaired else "", (english or "")[:40], total_ms,
+                    speaker or "-", (t3 - t2) * 1000, " repaired" if repaired else "",
+                    (english or "")[:40], total_ms,
                 )
-                return {"source": text, "english": english or "", "ms": total_ms}
+                return {"source": text, "english": english or "", "speaker": speaker, "ms": total_ms}
 
             result = await loop.run_in_executor(_executor, process, data)
 
@@ -219,6 +242,7 @@ async def ws_conversation(ws: WebSocket):
                 await ws.send_text(json.dumps({
                     "source": result["source"],
                     "english": result["english"],
+                    "speaker": result.get("speaker", ""),
                     "lang_tag": source_lang.upper(),
                     "seq": n,
                     "ts": time.time(),

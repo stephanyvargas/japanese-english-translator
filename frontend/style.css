@@ -85,6 +85,10 @@ details.control-row textarea {
   font-family: monospace;
 }
 
+.speaker {
+  font-weight: 600;
+}
+
 select, input[type="text"] {
   background: var(--surface2);
   border: 1px solid var(--border);

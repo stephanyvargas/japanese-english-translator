@@ -2,30 +2,52 @@
 
 Quality-focused Japanese-to-English translation system with microphone input. Speak Japanese, get English output — continuously, with full conversational context.
 
+> **Why this design?** For a deep dive on the quality architecture — segmentation,
+> terminology consistency, speaker diarization, prompt caching, and the self-repair /
+> review loops — plus the research and papers behind it, see
+> [`docs/quality-architecture.md`](docs/quality-architecture.md).
+
 ## How it works
 
-**Conversation mode** (default): A background thread records audio continuously so nothing is lost while the model is translating. Every 8 seconds, accumulated audio is sent to OpenAI Whisper for transcription, then to Claude for translation. Each chunk receives the full conversation history so context carries across utterances.
+**Conversation mode** (default, the meeting surface): audio is captured continuously and
+segmented on natural pauses (voice-activity detection), so chunks break at clause
+boundaries instead of mid-word. Each chunk is transcribed by OpenAI `gpt-4o-transcribe`,
+tagged with a speaker (diarization), and translated by Claude with the recent history,
+a session glossary, and the meeting context. A cheap self-repair pass fixes a chunk only
+when it actually drops meaning.
 
-**Single-shot mode** (`--once`, `--text`): A three-step quality pipeline — linguistic analysis, translation with adaptive thinking, bilingual review — with an optional refinement pass if the review score is below 8/10.
+**Single-shot mode** (`--once`, `--text`): a quality pipeline — linguistic analysis →
+translation with adaptive thinking → bilingual review → up to two refinement rounds
+(triggered when accuracy < 9 or naturalness < 8), with an optional back-translation
+drift check.
 
 ```
-Microphone → Whisper (transcription) → Claude (analysis → translation → review)
+Microphone → VAD segmentation → gpt-4o-transcribe → diarization
+          → Claude (context + glossary + speaker → translate → self-repair)
 ```
 
-### Whisper hallucination filtering
+### Transcription hallucination filtering
 
-When Whisper receives silence, music, or noise it tends to fabricate common phrases from its training data. Each transcription response is inspected at the segment level and segments are discarded if:
+When speech-to-text receives silence, music, or noise it tends to fabricate common
+phrases. `gpt-4o-transcribe` (the default) is filtered with a text-level guard —
+verbatim-repetition collapse plus a denylist of unambiguous video-outro artifacts
+(kept narrow so real speech like "ありがとうございました" is never dropped). The legacy
+`whisper-1` backend remains selectable and keeps its per-segment confidence filter
+(`no_speech_prob > 0.6`, `avg_logprob < -1.0`, `compression_ratio > 2.4`).
 
-- `no_speech_prob > 0.6` — likely silence or background noise
-- `avg_logprob < -1.0` — model confidence is too low
-- `compression_ratio > 2.4` — output is suspiciously repetitive
+### Terminology consistency (glossary)
+
+An optional **Key terms / names** field pins how names and jargon are rendered
+(`田中 => Tanaka`). The glossary is injected into the transcription prompt (to bias
+recognition) and into the analysis and translation prompts (to keep the English
+rendering identical across chunks and passes).
 
 ## Requirements
 
 - Python 3.10+
 - PortAudio (for microphone input): `sudo apt install libportaudio2` on Debian/Ubuntu
 - An Anthropic API key
-- An OpenAI API key (for Whisper transcription)
+- An OpenAI API key (for `gpt-4o-transcribe` speech-to-text)
 
 ## Setup
 
@@ -76,6 +98,26 @@ uvicorn server:app --reload --port 8000
 - `WS /ws/conversation` — real-time conversation mode (audio in, translations out)
 - `GET /health` — health probe
 
+### Speaker diarization (conversation mode)
+
+Because conversation mode cuts audio on natural pauses, each chunk is essentially one
+speaker's turn. The backend labels each chunk with a speaker (`Speaker 1/2/…`, or the
+names from the **Participants** field in first-appearance order) so the interpreter can
+resolve Japanese dropped subjects and the transcript reads as usable minutes. The
+default backend is a lightweight MFCC-statistics speaker signature (numpy/scipy — no
+extra dependency, no model file, fits the 1Gi Cloud Run); an optional ONNX d-vector
+upgrade is documented in [`translator/models/README.md`](translator/models/README.md).
+Toggle it off with the **Detect speakers** checkbox; overlapping speech on one shared
+mic is the main failure mode.
+
+### Rich context via prompt caching
+
+The session-constant part of the conversation prompt — role, rules, glossary, meeting
+context, and participant roster — is sent as a cached prefix (`cache_control: ephemeral`),
+so it is billed at ~0.1× on every chunk after the first. That makes a *rich* standing
+context affordable without adding per-chunk latency or cost; only the rolling history and
+the new chunk are re-processed each time.
+
 ## Deployment
 
 The app is deployed with the **frontend on Firebase Hosting** and the **backend on
@@ -122,13 +164,18 @@ gcloud run services logs read translator-backend --region asia-northeast1 --limi
 ```
 translator/
 ├── audio.py         # Microphone recording; AudioCapture for continuous threaded capture
-├── transcriber.py   # OpenAI Whisper transcription with hallucination filtering
+├── transcriber.py   # gpt-4o-transcribe (default) + text-level guard; whisper-1 fallback
+├── diarizer.py      # Per-chunk speaker embedding + online clustering (who spoke)
+├── glossary.py      # Per-session terminology store (names/jargon consistency)
 ├── analyzer.py      # Claude: detect domain, formality level, keigo, cultural references
 ├── translator.py    # Claude: translation with adaptive thinking
 ├── reviewer.py      # Claude: bilingual quality review, structured critique
+├── verifier.py      # Claude: opt-in back-translation drift check
 ├── pipeline.py      # Orchestrates all steps; run_conversation() and run()
 ├── prompts.py       # System prompts for each Claude role
-└── models.py        # Pydantic models: AnalysisResult, ReviewResult, FinalOutput
+├── models.py        # Pydantic models: AnalysisResult, ReviewResult, DriftResult, FinalOutput
+└── models/          # Optional ONNX speaker-embedding weights (see models/README.md)
+server.py            # FastAPI backend: /translate, WS /ws/conversation, /health
 main.py              # CLI entry point
 ```
 
@@ -136,5 +183,5 @@ main.py              # CLI entry point
 
 | Key | Used for |
 |-----|----------|
-| `ANTHROPIC_API_KEY` | All Claude calls (analysis, translation, review) |
-| `OPENAI_API_KEY` | Whisper speech-to-text transcription |
+| `ANTHROPIC_API_KEY` | All Claude calls (analysis, translation, review, self-repair) |
+| `OPENAI_API_KEY` | `gpt-4o-transcribe` speech-to-text (and `whisper-1` fallback) |

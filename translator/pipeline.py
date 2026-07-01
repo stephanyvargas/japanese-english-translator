@@ -25,12 +25,32 @@ def _text_of(msg) -> str:
     return "".join(b.text for b in msg.content if b.type == "text").strip()
 
 
-def _get_conversation_system(lang_name: str, context: str = "", glossary: str = "") -> str:
+def _conversation_system_blocks(
+    lang_name: str, context: str = "", glossary: str = "",
+    participants: str = "", diarized: bool = False,
+) -> list[dict]:
+    """Build the conversation system prompt as cacheable blocks.
+
+    Everything here is constant for the session (role, rules, glossary, meeting
+    context, participants), so it is sent as a `system` prefix with a
+    cache_control breakpoint — billed ~0.1x on every chunk after the first. The
+    volatile part (rolling history + the new chunk) goes in the user message.
+    """
     context_line = f"\nSetting: {context}\n" if context else ""
     glossary_line = f"\n{glossary}\n" if glossary else ""
-    return f"""\
+    roster = ", ".join(n.strip() for n in participants.splitlines() if n.strip())
+    roster_line = f"\nParticipants: {roster}\n" if roster else ""
+
+    speaker_rule = (
+        "- Each line is tagged with its speaker in [brackets]. Use the speaker to "
+        "resolve dropped subjects and make clear who is speaking, asking, or being "
+        "addressed — but do NOT print the [speaker] tag in your output\n"
+        if diarized else ""
+    )
+
+    text = f"""\
 You are a real-time {lang_name}-to-English conversation interpreter.
-{context_line}{glossary_line}
+{context_line}{glossary_line}{roster_line}
 You receive the conversation transcript so far (in {lang_name}) plus a new chunk to translate.
 Use the full history to resolve pronouns, implicit subjects, topic references, and incomplete
 sentences — context that would be impossible to translate in isolation.
@@ -44,8 +64,13 @@ and let the next chunk continue it — do not invent an ending
 - Reproduce numbers, dates, quantities, units, and proper nouns exactly as spoken
 - Convey the politeness/honorific register through natural English register, not literal honorifics
 - Keep names and untranslatable loanwords consistent with how they appeared earlier
-- Genuine noise or silence → output "(inaudible)"
+{speaker_rule}- Genuine noise or silence → output "(inaudible)"
 """
+    return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
+
+
+def _label(text: str, speaker: str) -> str:
+    return f"[{speaker}] {text}" if speaker else text
 
 
 _REPAIR_SYSTEM = """\
@@ -68,12 +93,13 @@ def _repair_translation(
     model: str,
     lang_name: str,
     glossary: str = "",
+    speaker: str = "",
 ) -> str:
     """One quick pass that returns a corrected translation, or the candidate unchanged."""
     glossary_line = f"{glossary}\n\n" if glossary else ""
     user_msg = (
         f"{glossary_line}{context_block}"
-        f"{lang_name} chunk:\n{new_source}\n\n"
+        f"{lang_name} chunk:\n{_label(new_source, speaker)}\n\n"
         f"Candidate English:\n{candidate}"
     )
     with client.messages.stream(
@@ -95,23 +121,37 @@ def _translate_with_context(
     context: str = "",
     glossary: str = "",
     repair: bool = True,
+    speaker: str = "",
+    speakers: list[str] | None = None,
+    participants: str = "",
 ) -> ConvResult:
     """Context-aware conversation translation with a guarded self-repair pass.
 
     Quality is prioritized over latency here (the frontend's backpressure bounds
     lag to ~1 chunk): the first pass uses adaptive thinking, then a cheap repair
-    pass corrects the translation only when it actually needs it.
+    pass corrects the translation only when it actually needs it. When speaker
+    labels are available (diarization), history and the new chunk are tagged so
+    the model can resolve dropped subjects.
     """
-    previous = "\n".join(f"[{i+1}] {t}" for i, t in enumerate(history[:-1]))
+    speakers = speakers or []
+    diarized = bool(speaker) or any(speakers)
+
+    prev_texts = history[:-1]
+    prev_speakers = speakers[:-1]
+    lines = []
+    for i, t in enumerate(prev_texts):
+        sp = prev_speakers[i] if i < len(prev_speakers) else ""
+        lines.append(f"[{i+1}] {_label(t, sp)}")
+    previous = "\n".join(lines)
     context_block = f"Conversation so far:\n{previous}\n\n" if previous else "(start of conversation)\n\n"
 
-    user_msg = f"{context_block}NEW chunk to translate:\n{new_source}"
+    user_msg = f"{context_block}NEW chunk to translate:\n{_label(new_source, speaker)}"
 
     with client.messages.stream(
         model=model,
         max_tokens=2048,
         thinking={"type": "adaptive"},
-        system=_get_conversation_system(lang_name, context, glossary),
+        system=_conversation_system_blocks(lang_name, context, glossary, participants, diarized),
         messages=[{"role": "user", "content": user_msg}],
     ) as stream:
         msg = stream.get_final_message()
@@ -123,7 +163,7 @@ def _translate_with_context(
     repaired = False
     if repair:
         fixed = _repair_translation(
-            new_source, english, context_block, client, model, lang_name, glossary,
+            new_source, english, context_block, client, model, lang_name, glossary, speaker,
         )
         if fixed and fixed != english:
             english = fixed
