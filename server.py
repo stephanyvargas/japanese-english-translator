@@ -56,6 +56,10 @@ app.add_middleware(
 
 _executor = ThreadPoolExecutor(max_workers=4)
 
+# Rolling-summary updates run on their own single worker so a blocking Haiku
+# call can never occupy a hot-path worker and stall chunk processing.
+_summary_executor = ThreadPoolExecutor(max_workers=1)
+
 LANGUAGE_NAMES = {
     "ja": "Japanese", "ko": "Korean", "zh": "Chinese",
     "es": "Spanish", "fr": "French", "de": "German",
@@ -184,8 +188,9 @@ async def ws_conversation(ws: WebSocket):
 
     anthropic_client = anthropic.Anthropic()
     openai_client = OpenAI()
-    source_history: list[str] = []
-    speaker_history: list[str] = []
+    # One (text, speaker) tuple per processed chunk — a single list so the
+    # transcript and its speaker labels can never fall out of alignment.
+    turns: list[tuple[str, str]] = []
     loop = asyncio.get_event_loop()
     seq = 0
 
@@ -195,14 +200,10 @@ async def ws_conversation(ws: WebSocket):
 
     def update_summary() -> None:
         try:
-            end = len(source_history) - MAX_HISTORY
+            end = len(turns) - MAX_HISTORY
             if end <= summary_state["upto"]:
                 return
-            lines = [
-                _label(source_history[i],
-                       speaker_history[i] if i < len(speaker_history) else "")
-                for i in range(summary_state["upto"], end)
-            ]
+            lines = [_label(t, sp) for t, sp in turns[summary_state["upto"]:end]]
             summary_state["summary"] = _summarize_history(
                 lines, summary_state["summary"], anthropic_client)
             summary_state["upto"] = end
@@ -253,7 +254,7 @@ async def ws_conversation(ws: WebSocket):
                 t1 = time.perf_counter()
 
                 # Continuity prompt: tail of the last few turns, not just one.
-                prompt = " ".join(source_history[-3:])[-STT_PROMPT_CHARS:]
+                prompt = " ".join(t for t, _ in turns[-3:])[-STT_PROMPT_CHARS:]
                 text = transcribe(wav_bytes, openai_client, prompt=prompt,
                                   source_lang=source_lang, model=stt_model, glossary=glossary_stt)
                 t2 = time.perf_counter()
@@ -273,17 +274,17 @@ async def ws_conversation(ws: WebSocket):
                     except Exception as exc:
                         log.info("#%d diarize skipped (%s)", n, exc)
 
-                source_history.append(text)
-                speaker_history.append(speaker)
+                turns.append((text, speaker))
                 # Verbatim window: everything the summary hasn't folded yet (so
                 # summary + verbatim always cover the whole conversation), at
                 # least MAX_HISTORY turns, capped at MAX_VERBATIM.
-                start = max(summary_state["upto"], len(source_history) - MAX_VERBATIM)
-                start = min(start, max(0, len(source_history) - MAX_HISTORY))
+                start = max(summary_state["upto"], len(turns) - MAX_VERBATIM)
+                start = min(start, max(0, len(turns) - MAX_HISTORY))
+                window = turns[start:]
                 english, repaired = _translate_with_context(
-                    text, source_history[start:], anthropic_client,
+                    text, [t for t, _ in window], anthropic_client,
                     model=model, lang_name=lang_name, context=context, glossary=glossary_prompt,
-                    speaker=speaker, speakers=speaker_history[start:], participants=participants,
+                    speaker=speaker, speakers=[sp for _, sp in window], participants=participants,
                     summary=summary_state["summary"], diarized=diarize,
                 )
                 t3 = time.perf_counter()
@@ -319,11 +320,11 @@ async def ws_conversation(ws: WebSocket):
                 }))
                 # Fold aging turns into the rolling summary — after the reply is
                 # sent, off the hot path, never overlapping itself.
-                if (len(source_history) % SUMMARY_EVERY == 0
-                        and len(source_history) > MAX_HISTORY
+                if (len(turns) % SUMMARY_EVERY == 0
+                        and len(turns) > MAX_HISTORY
                         and not summary_state["busy"]):
                     summary_state["busy"] = True
-                    _executor.submit(update_summary)
+                    _summary_executor.submit(update_summary)
 
     except WebSocketDisconnect:
         log.info("WS disconnected after %d chunks", seq)

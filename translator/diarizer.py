@@ -23,6 +23,7 @@ from __future__ import annotations
 import io
 import os
 import wave
+from functools import lru_cache
 
 import numpy as np
 
@@ -65,8 +66,11 @@ def _mel_to_hz(mel: np.ndarray) -> np.ndarray:
     return 700.0 * (10.0 ** (mel / 2595.0) - 1.0)
 
 
+@lru_cache(maxsize=4)
 def _mel_filterbank(n_fft: int, sr: int) -> np.ndarray:
-    """Triangular mel filterbank, shape (n_mels, n_fft//2 + 1)."""
+    """Triangular mel filterbank, shape (n_mels, n_fft//2 + 1). Cached — the
+    inputs are constants at runtime, so this is built once, not per chunk.
+    Treat the returned array as read-only."""
     n_bins = n_fft // 2 + 1
     mel_pts = np.linspace(_hz_to_mel(np.array([_FMIN]))[0],
                           _hz_to_mel(np.array([_FMAX]))[0], _N_MELS + 2)
@@ -83,13 +87,20 @@ def _mel_filterbank(n_fft: int, sr: int) -> np.ndarray:
     return fb
 
 
+@lru_cache(maxsize=4)
 def _dct_matrix(n_out: int, n_in: int) -> np.ndarray:
-    """Orthonormal DCT-II matrix, shape (n_out, n_in)."""
+    """Orthonormal DCT-II matrix, shape (n_out, n_in). Cached (read-only)."""
     n = np.arange(n_in)
     k = np.arange(n_out)[:, None]
     d = np.cos(np.pi / n_in * (n + 0.5) * k) * np.sqrt(2.0 / n_in)
     d[0] *= 1.0 / np.sqrt(2.0)
     return d.astype(np.float32)
+
+
+@lru_cache(maxsize=4)
+def _hann_window(frame_len: int) -> np.ndarray:
+    """Hanning window, cached (read-only)."""
+    return np.hanning(frame_len).astype(np.float32)
 
 
 def _mfcc(samples: np.ndarray, sr: int = _SAMPLE_RATE) -> np.ndarray:
@@ -103,7 +114,7 @@ def _mfcc(samples: np.ndarray, sr: int = _SAMPLE_RATE) -> np.ndarray:
     emph = np.append(samples[0], samples[1:] - 0.97 * samples[:-1])
     n_frames = 1 + (emph.shape[0] - frame_len) // hop
     idx = np.arange(frame_len)[None, :] + hop * np.arange(n_frames)[:, None]
-    frames = emph[idx] * np.hanning(frame_len).astype(np.float32)
+    frames = emph[idx] * _hann_window(frame_len)
 
     n_fft = 1
     while n_fft < frame_len:

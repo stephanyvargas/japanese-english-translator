@@ -46,8 +46,9 @@ function nowStamp() {
 }
 
 // Stable per-speaker color, assigned in first-appearance order.
+// Reset on each new conversation so colors track the new session's speakers.
 const speakerColors = ['#4a9dff', '#4ecb7a', '#e0a13a', '#c471d6', '#e0655a', '#3ec3c3'];
-const speakerIndex = {};
+let speakerIndex = {};
 function speakerTag(speaker) {
   if (!speaker) return '';
   if (!(speaker in speakerIndex)) speakerIndex[speaker] = Object.keys(speakerIndex).length;
@@ -241,6 +242,7 @@ async function startConversation() {
   inFlight = false;
   pendingChunk = null;
   dropped = 0;
+  speakerIndex = {};  // fresh session → fresh first-appearance color order
   startBtn.disabled = true;
   stopBtn.disabled = false;
   setStatus();
