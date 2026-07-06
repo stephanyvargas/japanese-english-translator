@@ -69,6 +69,22 @@ label {
 
 label.full-width { flex: 100%; }
 
+/* Collapsible "Key terms / names" block */
+details.control-row {
+  display: block;
+}
+details.control-row summary {
+  cursor: pointer;
+  font-size: 0.78rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 8px;
+}
+details.control-row textarea {
+  font-family: monospace;
+}
+
 select, input[type="text"] {
   background: var(--surface2);
   border: 1px solid var(--border);

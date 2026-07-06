@@ -4,10 +4,13 @@ from .models import AnalysisResult
 from .prompts import get_translator_prompt
 
 
-def _build_context(analysis: AnalysisResult, lang_name: str, critique: str | None, context: str) -> str:
+def _build_context(analysis: AnalysisResult, lang_name: str, critique: str | None, context: str,
+                   glossary: str = "") -> str:
     lines = []
     if context:
         lines.append(f"Setting: {context}")
+    if glossary:
+        lines.append(glossary)
     lines += [
         f"Domain: {analysis.domain}",
         f"Formality: {analysis.formality_level}",
@@ -32,9 +35,10 @@ def translate(
     model: str = "claude-sonnet-4-6",
     lang_name: str = "Japanese",
     context: str = "",
+    glossary: str = "",
 ) -> str:
     """Produce an English translation using adaptive thinking for deep reasoning."""
-    context = _build_context(analysis, lang_name, critique, context)
+    context = _build_context(analysis, lang_name, critique, context, glossary)
     user_message = (
         f"Linguistic context:\n{context}\n\n"
         f"{lang_name} source:\n{source_text}\n\n"

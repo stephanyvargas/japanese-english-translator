@@ -16,6 +16,11 @@ class ReviewResult(BaseModel):
     suggestions: list[str]
 
 
+class DriftResult(BaseModel):
+    has_drift: bool
+    drift_notes: list[str]
+
+
 class FinalOutput(BaseModel):
     source_text: str
     english_text: str

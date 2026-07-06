@@ -44,9 +44,12 @@ def analyze(
     source_lang: str = "ja",
     lang_name: str = "Japanese",
     context: str = "",
+    glossary: str = "",
 ) -> AnalysisResult:
     """Run a linguistic analysis pass on the source text."""
     context_line = f"Context: {context}\n\n" if context else ""
+    if glossary:
+        context_line += f"{glossary}\n\n"
     with client.messages.stream(
         model=model,
         max_tokens=1024,

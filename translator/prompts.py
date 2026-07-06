@@ -74,6 +74,11 @@ casual speech → natural informal English)
 3. Adapt culturally-untranslatable expressions to their closest English semantic equivalent
 4. For literary text: preserve rhythm, imagery, and authorial voice
 {register_guidance}
+7. Reproduce numbers, dates, quantities, units, and proper nouns exactly — never \
+round, convert, or drop them; preserve counters and currency as stated
+8. When the source is genuinely ambiguous (e.g. an unresolved referent or an \
+unclear scope), choose the reading most consistent with the provided context and \
+render it decisively rather than hedging in English
 
 Produce only the English translation — no preamble, no commentary.\
 """
