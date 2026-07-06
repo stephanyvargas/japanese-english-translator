@@ -57,19 +57,24 @@ cp .env.example .env
 # Edit .env and add your API keys
 ```
 
-## Usage
+## Usage (CLI)
+
+> The **web app** (below) is the meeting surface with the full quality stack —
+> VAD segmentation, diarization, glossary, cached rich context, self-repair.
+> The CLI conversation mode is a simpler fixed-interval mode without those
+> features; `--once` / `--text` do run the full quality pipeline.
 
 ```bash
-# Continuous conversation mode (default)
+# Basic conversation mode (default): fixed-interval chunking, context-aware translation
 python3 main.py
 
 # Adjust how often audio is processed (default: every 8 seconds)
 python3 main.py --interval 12
 
-# Translate a single spoken utterance, then exit
+# Translate a single spoken utterance with the full quality pipeline, then exit
 python3 main.py --once --notes
 
-# Translate typed text, then exit
+# Translate typed text with the full quality pipeline, then exit
 python3 main.py --text "おつかれさまでした。" --notes
 ```
 
@@ -116,7 +121,23 @@ The session-constant part of the conversation prompt — role, rules, glossary, 
 context, and participant roster — is sent as a cached prefix (`cache_control: ephemeral`),
 so it is billed at ~0.1× on every chunk after the first. That makes a *rich* standing
 context affordable without adding per-chunk latency or cost; only the rolling history and
-the new chunk are re-processed each time.
+the new chunk are re-processed each time. The self-repair checker uses its own cached
+prefix with the same session facts, and replies a bare `OK` when a translation needs no
+fix (so "repaired" means a real correction, not a paraphrase).
+
+### Long-range context (rolling summary)
+
+Only the last few turns are sent verbatim per chunk (keeps latency flat), but turns that
+scroll out of that window are folded into a **rolling meeting summary** (a cheap Haiku
+call, updated off the hot path every few chunks). The summary rides along with every
+translation, so references to topics from earlier in the meeting still resolve.
+
+### Recording chunks for evaluation (local dev)
+
+Set `SAVE_CHUNKS_DIR=/path/to/dir` before starting the backend to dump, per session,
+each processed chunk's 16 kHz WAV plus a `session.jsonl` line
+(`seq, ts, speaker, sim, source, english, repaired, ms`). Useful for building an eval
+set from real meetings. Local-only convenience — leave it unset on Cloud Run.
 
 ## Deployment
 

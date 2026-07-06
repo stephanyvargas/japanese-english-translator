@@ -25,6 +25,15 @@ def _text_of(msg) -> str:
     return "".join(b.text for b in msg.content if b.type == "text").strip()
 
 
+def _session_lines(context: str, glossary: str, participants: str) -> tuple[str, str, str]:
+    """Format the session-constant prompt fragments shared by both cached prefixes."""
+    context_line = f"\nSetting: {context}\n" if context else ""
+    glossary_line = f"\n{glossary}\n" if glossary else ""
+    roster = ", ".join(n.strip() for n in participants.splitlines() if n.strip())
+    roster_line = f"\nParticipants: {roster}\n" if roster else ""
+    return context_line, glossary_line, roster_line
+
+
 def _conversation_system_blocks(
     lang_name: str, context: str = "", glossary: str = "",
     participants: str = "", diarized: bool = False,
@@ -34,12 +43,10 @@ def _conversation_system_blocks(
     Everything here is constant for the session (role, rules, glossary, meeting
     context, participants), so it is sent as a `system` prefix with a
     cache_control breakpoint — billed ~0.1x on every chunk after the first. The
-    volatile part (rolling history + the new chunk) goes in the user message.
+    volatile part (summary + rolling history + the new chunk) goes in the user
+    message.
     """
-    context_line = f"\nSetting: {context}\n" if context else ""
-    glossary_line = f"\n{glossary}\n" if glossary else ""
-    roster = ", ".join(n.strip() for n in participants.splitlines() if n.strip())
-    roster_line = f"\nParticipants: {roster}\n" if roster else ""
+    context_line, glossary_line, roster_line = _session_lines(context, glossary, participants)
 
     speaker_rule = (
         "- Each line is tagged with its speaker in [brackets]. Use the speaker to "
@@ -73,16 +80,37 @@ def _label(text: str, speaker: str) -> str:
     return f"[{speaker}] {text}" if speaker else text
 
 
-_REPAIR_SYSTEM = """\
-You are a bilingual interpreter's quality checker. You are given a source-language \
-chunk and a candidate English translation of it, plus recent conversation context.
+def _repair_system_blocks(
+    lang_name: str, context: str = "", glossary: str = "",
+    participants: str = "", diarized: bool = False,
+) -> list[dict]:
+    """Cached system prefix for the repair pass.
 
-If the translation is faithful and natural, output it UNCHANGED.
-If it drops meaning, mistakes a referent/subject, mishandles a number or name, or reads \
-awkwardly, output a corrected English translation.
+    Same session-constant material as the translator prefix (setting, glossary,
+    roster) so the checker judges against the same facts, plus an OK-sentinel
+    protocol: a clean translation gets a bare "OK" instead of being re-echoed —
+    no false "repaired" flags from paraphrase, and fewer output tokens.
+    """
+    context_line, glossary_line, roster_line = _session_lines(context, glossary, participants)
+    speaker_rule = (
+        "- Lines are tagged with their speaker in [brackets]; use them to check that "
+        "dropped subjects and referents were resolved correctly. Never print a tag\n"
+        if diarized else ""
+    )
+    text = f"""\
+You are a bilingual quality checker for a real-time {lang_name}-to-English interpreter.
+{context_line}{glossary_line}{roster_line}
+You receive recent conversation context, a new {lang_name} chunk, and a candidate English
+translation of that chunk.
 
-Output ONLY the final English translation — no labels, no commentary, no explanation.\
-"""
+Rules:
+- If the candidate is faithful and natural, reply with exactly: OK
+- Otherwise output ONLY the corrected English translation — no labels, no commentary
+- Only correct real problems: dropped meaning, a wrong referent/subject, a mishandled \
+number/date/name, or genuinely awkward English. Do not rephrase acceptable translations
+- Keep glossary renderings and earlier name spellings
+{speaker_rule}"""
+    return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
 
 
 def _repair_translation(
@@ -92,24 +120,29 @@ def _repair_translation(
     client: anthropic.Anthropic,
     model: str,
     lang_name: str,
+    context: str = "",
     glossary: str = "",
+    participants: str = "",
     speaker: str = "",
-) -> str:
-    """One quick pass that returns a corrected translation, or the candidate unchanged."""
-    glossary_line = f"{glossary}\n\n" if glossary else ""
+    diarized: bool = False,
+) -> tuple[str, bool]:
+    """One quick pass; returns (translation, repaired). "OK" keeps the candidate."""
     user_msg = (
-        f"{glossary_line}{context_block}"
+        f"{context_block}"
         f"{lang_name} chunk:\n{_label(new_source, speaker)}\n\n"
         f"Candidate English:\n{candidate}"
     )
     with client.messages.stream(
         model=model,
         max_tokens=512,
-        system=_REPAIR_SYSTEM,
+        system=_repair_system_blocks(lang_name, context, glossary, participants, diarized),
         messages=[{"role": "user", "content": user_msg}],
     ) as stream:
         msg = stream.get_final_message()
-    return _text_of(msg) or candidate
+    reply = _text_of(msg)
+    if not reply or reply.strip().rstrip(".").upper() == "OK":
+        return candidate, False
+    return reply, True
 
 
 def _translate_with_context(
@@ -124,6 +157,7 @@ def _translate_with_context(
     speaker: str = "",
     speakers: list[str] | None = None,
     participants: str = "",
+    summary: str = "",
 ) -> ConvResult:
     """Context-aware conversation translation with a guarded self-repair pass.
 
@@ -131,7 +165,8 @@ def _translate_with_context(
     lag to ~1 chunk): the first pass uses adaptive thinking, then a cheap repair
     pass corrects the translation only when it actually needs it. When speaker
     labels are available (diarization), history and the new chunk are tagged so
-    the model can resolve dropped subjects.
+    the model can resolve dropped subjects. ``summary`` is a rolling digest of
+    turns older than the verbatim window (long-range context).
     """
     speakers = speakers or []
     diarized = bool(speaker) or any(speakers)
@@ -143,7 +178,11 @@ def _translate_with_context(
         sp = prev_speakers[i] if i < len(prev_speakers) else ""
         lines.append(f"[{i+1}] {_label(t, sp)}")
     previous = "\n".join(lines)
-    context_block = f"Conversation so far:\n{previous}\n\n" if previous else "(start of conversation)\n\n"
+    summary_block = f"Meeting so far (summary):\n{summary}\n\n" if summary else ""
+    if previous:
+        context_block = f"{summary_block}Recent turns:\n{previous}\n\n"
+    else:
+        context_block = summary_block or "(start of conversation)\n\n"
 
     user_msg = f"{context_block}NEW chunk to translate:\n{_label(new_source, speaker)}"
 
@@ -162,14 +201,54 @@ def _translate_with_context(
 
     repaired = False
     if repair:
-        fixed = _repair_translation(
-            new_source, english, context_block, client, model, lang_name, glossary, speaker,
+        english, repaired = _repair_translation(
+            new_source, english, context_block, client, model, lang_name,
+            context=context, glossary=glossary, participants=participants,
+            speaker=speaker, diarized=diarized,
         )
-        if fixed and fixed != english:
-            english = fixed
-            repaired = True
 
     return ConvResult(english, repaired)
+
+
+# ── rolling meeting summary ──────────────────────────────────────────────────
+
+_SUMMARY_MODEL = "claude-haiku-4-5"
+
+_SUMMARY_SYSTEM = """\
+You maintain a running summary of a live meeting for a simultaneous interpreter.
+You receive the current summary (may be empty) and new transcript lines that are
+about to scroll out of the interpreter's verbatim context window.
+
+Fold the new lines into the summary. Keep at most 10 concise bullet points covering:
+topics discussed, decisions made, open questions, and who said or asked what
+(speaker tags appear in [brackets] when known). Write the summary in English.
+Output ONLY the updated bullet list — no preamble, no commentary.\
+"""
+
+
+def _summarize_history(
+    older_lines: list[str],
+    prev_summary: str,
+    client: anthropic.Anthropic,
+    model: str = _SUMMARY_MODEL,
+) -> str:
+    """Fold transcript lines leaving the verbatim window into a running summary.
+
+    Cheap (haiku) and called off the hot path — a stale-by-a-few-chunks summary
+    is fine. Returns the previous summary unchanged on empty output.
+    """
+    if not older_lines:
+        return prev_summary
+    prev_block = f"Current summary:\n{prev_summary}\n\n" if prev_summary else "Current summary: (empty)\n\n"
+    user_msg = prev_block + "New lines to fold in:\n" + "\n".join(older_lines)
+    with client.messages.stream(
+        model=model,
+        max_tokens=1024,
+        system=_SUMMARY_SYSTEM,
+        messages=[{"role": "user", "content": user_msg}],
+    ) as stream:
+        msg = stream.get_final_message()
+    return _text_of(msg) or prev_summary
 
 
 def run_conversation(

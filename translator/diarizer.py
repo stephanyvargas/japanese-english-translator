@@ -185,8 +185,13 @@ class SpeakerBook:
             return self.names[speaker_id]
         return f"Speaker {speaker_id + 1}"
 
-    def assign(self, embedding: np.ndarray) -> tuple[int, str]:
-        """Return (speaker_id, label) for an embedding, updating centroids."""
+    def assign(self, embedding: np.ndarray) -> tuple[int, str, float]:
+        """Return (speaker_id, label, best_sim) for an embedding, updating centroids.
+
+        ``best_sim`` is the best cosine similarity *before* thresholding (-1.0 when
+        the book was empty) — logged per chunk so DIARIZE_THRESHOLD can be tuned
+        against real audio: raise it if distinct speakers merge, lower if one splits.
+        """
         best_id, best_sim = -1, -1.0
         for i, c in enumerate(self._centroids):
             sim = float(np.dot(embedding, c))  # both are L2-normalized → cosine
@@ -199,9 +204,9 @@ class SpeakerBook:
             merged /= np.linalg.norm(merged) or 1.0
             self._centroids[best_id] = merged.astype(np.float32)
             self._counts[best_id] = n
-            return best_id, self.label_for(best_id)
+            return best_id, self.label_for(best_id), best_sim
 
         self._centroids.append(embedding.astype(np.float32))
         self._counts.append(1)
         new_id = len(self._centroids) - 1
-        return new_id, self.label_for(new_id)
+        return new_id, self.label_for(new_id), best_sim
