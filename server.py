@@ -68,11 +68,15 @@ MODEL_ALIASES = {
     "haiku": "claude-haiku-4-5",
 }
 
-# Only the last N turns are sent verbatim to Claude per chunk — keeps latency
-# flat as the conversation grows. Older turns are folded into a rolling summary
-# (updated off the hot path every SUMMARY_EVERY chunks) for long-range context.
+# At least the last MAX_HISTORY turns are sent verbatim to Claude per chunk —
+# keeps latency flat as the conversation grows. Older turns are folded into a
+# rolling summary (updated off the hot path every SUMMARY_EVERY chunks). The
+# verbatim window always extends back to the summary's fold watermark so no
+# turn is ever in neither the summary nor the verbatim block; MAX_VERBATIM
+# caps it in case the summarizer stalls (e.g. persistent API errors).
 MAX_HISTORY = 6
 SUMMARY_EVERY = 8
+MAX_VERBATIM = MAX_HISTORY + 2 * SUMMARY_EVERY
 
 # STT continuity prompt: tail of the recent transcript (the STT prompt token
 # budget is small; the tail is what biases continuation of names/topics).
@@ -271,11 +275,16 @@ async def ws_conversation(ws: WebSocket):
 
                 source_history.append(text)
                 speaker_history.append(speaker)
+                # Verbatim window: everything the summary hasn't folded yet (so
+                # summary + verbatim always cover the whole conversation), at
+                # least MAX_HISTORY turns, capped at MAX_VERBATIM.
+                start = max(summary_state["upto"], len(source_history) - MAX_VERBATIM)
+                start = min(start, max(0, len(source_history) - MAX_HISTORY))
                 english, repaired = _translate_with_context(
-                    text, source_history[-MAX_HISTORY:], anthropic_client,
+                    text, source_history[start:], anthropic_client,
                     model=model, lang_name=lang_name, context=context, glossary=glossary_prompt,
-                    speaker=speaker, speakers=speaker_history[-MAX_HISTORY:], participants=participants,
-                    summary=summary_state["summary"],
+                    speaker=speaker, speakers=speaker_history[start:], participants=participants,
+                    summary=summary_state["summary"], diarized=diarize,
                 )
                 t3 = time.perf_counter()
 

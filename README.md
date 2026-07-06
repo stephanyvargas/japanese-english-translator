@@ -122,8 +122,9 @@ context, and participant roster — is sent as a cached prefix (`cache_control: 
 so it is billed at ~0.1× on every chunk after the first. That makes a *rich* standing
 context affordable without adding per-chunk latency or cost; only the rolling history and
 the new chunk are re-processed each time. The self-repair checker uses its own cached
-prefix with the same session facts, and replies a bare `OK` when a translation needs no
-fix (so "repaired" means a real correction, not a paraphrase).
+prefix with the same session facts and returns a structured verdict through a forced
+tool (`needs_fix` + `corrected_english`), so "repaired" means a real correction — never
+a paraphrase, and never confused with a translation that legitimately reads "OK".
 
 ### Long-range context (rolling summary)
 

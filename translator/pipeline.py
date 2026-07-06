@@ -87,30 +87,55 @@ def _repair_system_blocks(
     """Cached system prefix for the repair pass.
 
     Same session-constant material as the translator prefix (setting, glossary,
-    roster) so the checker judges against the same facts, plus an OK-sentinel
-    protocol: a clean translation gets a bare "OK" instead of being re-echoed —
-    no false "repaired" flags from paraphrase, and fewer output tokens.
+    roster) so the checker judges against the same facts. The verdict comes back
+    through a forced tool (see _REPAIR_TOOL) — a structured needs_fix flag can't
+    collide with translation text the way a string sentinel would, and a clean
+    translation is never re-echoed.
     """
     context_line, glossary_line, roster_line = _session_lines(context, glossary, participants)
     speaker_rule = (
         "- Lines are tagged with their speaker in [brackets]; use them to check that "
-        "dropped subjects and referents were resolved correctly. Never print a tag\n"
+        "dropped subjects and referents were resolved correctly. Never include a tag "
+        "in corrected_english\n"
         if diarized else ""
     )
     text = f"""\
 You are a bilingual quality checker for a real-time {lang_name}-to-English interpreter.
 {context_line}{glossary_line}{roster_line}
 You receive recent conversation context, a new {lang_name} chunk, and a candidate English
-translation of that chunk.
+translation of that chunk. Submit your verdict with the submit_check tool.
 
 Rules:
-- If the candidate is faithful and natural, reply with exactly: OK
-- Otherwise output ONLY the corrected English translation — no labels, no commentary
 - Only correct real problems: dropped meaning, a wrong referent/subject, a mishandled \
 number/date/name, or genuinely awkward English. Do not rephrase acceptable translations
 - Keep glossary renderings and earlier name spellings
 {speaker_rule}"""
     return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
+
+
+# Forced tool for the repair verdict — structured, so a legitimate translation
+# that happens to read "OK" can never be mistaken for a no-op verdict.
+_REPAIR_TOOL = {
+    "name": "submit_check",
+    "description": "Submit the verdict on the candidate translation.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "needs_fix": {
+                "type": "boolean",
+                "description": "true only if the candidate has a real problem (dropped "
+                               "meaning, wrong referent/subject, mishandled number/date/"
+                               "name, or genuinely awkward English)",
+            },
+            "corrected_english": {
+                "type": "string",
+                "description": "The corrected English translation when needs_fix is "
+                               "true; empty string when needs_fix is false",
+            },
+        },
+        "required": ["needs_fix", "corrected_english"],
+    },
+}
 
 
 def _repair_translation(
@@ -126,7 +151,7 @@ def _repair_translation(
     speaker: str = "",
     diarized: bool = False,
 ) -> tuple[str, bool]:
-    """One quick pass; returns (translation, repaired). "OK" keeps the candidate."""
+    """One quick pass; returns (translation, repaired)."""
     user_msg = (
         f"{context_block}"
         f"{lang_name} chunk:\n{_label(new_source, speaker)}\n\n"
@@ -136,13 +161,20 @@ def _repair_translation(
         model=model,
         max_tokens=512,
         system=_repair_system_blocks(lang_name, context, glossary, participants, diarized),
+        tools=[_REPAIR_TOOL],
+        tool_choice={"type": "tool", "name": "submit_check"},
         messages=[{"role": "user", "content": user_msg}],
     ) as stream:
         msg = stream.get_final_message()
-    reply = _text_of(msg)
-    if not reply or reply.strip().rstrip(".").upper() == "OK":
+    tool_block = next((b for b in msg.content if b.type == "tool_use"), None)
+    if tool_block is None:
         return candidate, False
-    return reply, True
+    fixed = (tool_block.input.get("corrected_english") or "").strip()
+    # Repaired only when the checker flags a problem AND actually changed the text
+    # (a verbatim echo is not a repair — keeps logs and eval data honest).
+    if tool_block.input.get("needs_fix") and fixed and fixed != candidate:
+        return fixed, True
+    return candidate, False
 
 
 def _translate_with_context(
@@ -158,6 +190,7 @@ def _translate_with_context(
     speakers: list[str] | None = None,
     participants: str = "",
     summary: str = "",
+    diarized: bool | None = None,
 ) -> ConvResult:
     """Context-aware conversation translation with a guarded self-repair pass.
 
@@ -167,9 +200,15 @@ def _translate_with_context(
     labels are available (diarization), history and the new chunk are tagged so
     the model can resolve dropped subjects. ``summary`` is a rolling digest of
     turns older than the verbatim window (long-range context).
+
+    ``diarized`` toggles the speaker rule in the cached system prefixes. Pass the
+    session's diarize *config* flag — it must be constant for the session, or the
+    "cached" prefix text changes mid-session and busts the prompt cache. The
+    per-chunk fallback below is for callers without session config (CLI).
     """
     speakers = speakers or []
-    diarized = bool(speaker) or any(speakers)
+    if diarized is None:
+        diarized = bool(speaker) or any(speakers)
 
     prev_texts = history[:-1]
     prev_speakers = speakers[:-1]
