@@ -53,6 +53,14 @@
           <input type="checkbox" id="verify" /> Verify with back-translation (text mode, slower/higher quality)
         </label>
       </details>
+      <details class="control-row">
+        <summary>Participants <span class="hint">(optional — conversation mode: label who is speaking)</span></summary>
+        <textarea id="participants" rows="3"
+          placeholder="One name per line, in likely speaking order:&#10;Tanaka&#10;Suzuki"></textarea>
+        <label class="checkbox-label">
+          <input type="checkbox" id="diarize" checked /> Detect speakers (diarization)
+        </label>
+      </details>
       <div class="control-row">
         <label>
           Backend URL

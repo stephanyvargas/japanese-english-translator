@@ -32,9 +32,13 @@ logging.basicConfig(
 )
 log = logging.getLogger("translator")
 
+from translator.diarizer import SpeakerBook, SpeakerEmbedder  # noqa: E402
 from translator.glossary import Glossary  # noqa: E402
-from translator.pipeline import run, _translate_with_context  # noqa: E402
+from translator.pipeline import _label, _summarize_history, _translate_with_context, run  # noqa: E402
 from translator.transcriber import DEFAULT_STT_MODEL, transcribe  # noqa: E402
+
+# Shared across connections — model/state is loaded once, embedding is stateless.
+_embedder = SpeakerEmbedder()
 
 app = FastAPI(title="Translator API")
 
@@ -52,6 +56,10 @@ app.add_middleware(
 
 _executor = ThreadPoolExecutor(max_workers=4)
 
+# Rolling-summary updates run on their own single worker so a blocking Haiku
+# call can never occupy a hot-path worker and stall chunk processing.
+_summary_executor = ThreadPoolExecutor(max_workers=1)
+
 LANGUAGE_NAMES = {
     "ja": "Japanese", "ko": "Korean", "zh": "Chinese",
     "es": "Spanish", "fr": "French", "de": "German",
@@ -64,9 +72,24 @@ MODEL_ALIASES = {
     "haiku": "claude-haiku-4-5",
 }
 
-# Only the last N turns are sent to Claude per chunk — keeps latency flat as
-# the conversation grows (full history is still used for Whisper prompt continuity).
+# At least the last MAX_HISTORY turns are sent verbatim to Claude per chunk —
+# keeps latency flat as the conversation grows. Older turns are folded into a
+# rolling summary (updated off the hot path every SUMMARY_EVERY chunks). The
+# verbatim window always extends back to the summary's fold watermark so no
+# turn is ever in neither the summary nor the verbatim block; MAX_VERBATIM
+# caps it in case the summarizer stalls (e.g. persistent API errors).
 MAX_HISTORY = 6
+SUMMARY_EVERY = 8
+MAX_VERBATIM = MAX_HISTORY + 2 * SUMMARY_EVERY
+
+# STT continuity prompt: tail of the recent transcript (the STT prompt token
+# budget is small; the tail is what biases continuation of names/topics).
+STT_PROMPT_CHARS = 400
+
+# Opt-in per-chunk recorder (local dev only — Cloud Run has no persistent disk).
+# When set, each session dumps its 16k mono WAV chunks + a JSONL transcript,
+# which doubles as eval-harness input collected from real meetings.
+SAVE_CHUNKS_DIR = os.environ.get("SAVE_CHUNKS_DIR", "").strip()
 
 
 def _to_wav(audio_bytes: bytes) -> bytes:
@@ -158,14 +181,57 @@ async def ws_conversation(ws: WebSocket):
     glossary_stt = glossary.format_for_stt()
     glossary_prompt = glossary.format_for_prompt()
 
+    participants = cfg.get("participants", "")
+    diarize = bool(cfg.get("diarize", True))
+    names = [n.strip() for n in participants.splitlines() if n.strip()]
+    speaker_book = SpeakerBook(names=names)
+
     anthropic_client = anthropic.Anthropic()
     openai_client = OpenAI()
-    source_history: list[str] = []
+    # One (text, speaker) tuple per processed chunk — a single list so the
+    # transcript and its speaker labels can never fall out of alignment.
+    turns: list[tuple[str, str]] = []
     loop = asyncio.get_event_loop()
     seq = 0
 
-    log.info("WS connected | model=%s stt=%s lang=%s context=%r terms=%d",
-             model, stt_model, source_lang, context, len(glossary))
+    # Rolling summary of turns older than the verbatim window (long-range
+    # context). Updated off the hot path; "upto" marks how far it has folded.
+    summary_state = {"summary": "", "upto": 0, "busy": False}
+
+    def update_summary() -> None:
+        try:
+            end = len(turns) - MAX_HISTORY
+            if end <= summary_state["upto"]:
+                return
+            lines = [_label(t, sp) for t, sp in turns[summary_state["upto"]:end]]
+            summary_state["summary"] = _summarize_history(
+                lines, summary_state["summary"], anthropic_client)
+            summary_state["upto"] = end
+            log.info("summary updated (folded %d turns): %r",
+                     len(lines), summary_state["summary"][:80])
+        except Exception as exc:
+            log.info("summary update failed (%s)", exc)
+        finally:
+            summary_state["busy"] = False
+
+    # Opt-in chunk recorder (see SAVE_CHUNKS_DIR above).
+    session_dir = ""
+    if SAVE_CHUNKS_DIR:
+        session_dir = os.path.join(SAVE_CHUNKS_DIR, time.strftime("%Y%m%d-%H%M%S"))
+        os.makedirs(session_dir, exist_ok=True)
+        log.info("recording chunks to %s", session_dir)
+
+    def save_chunk(n: int, wav_bytes: bytes, record: dict) -> None:
+        try:
+            with open(os.path.join(session_dir, f"{n:04d}.wav"), "wb") as f:
+                f.write(wav_bytes)
+            with open(os.path.join(session_dir, "session.jsonl"), "a") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            log.info("#%d chunk save failed (%s)", n, exc)
+
+    log.info("WS connected | model=%s stt=%s lang=%s context=%r terms=%d diarize=%s participants=%d",
+             model, stt_model, source_lang, context, len(glossary), diarize, len(names))
 
     try:
         while True:
@@ -187,7 +253,8 @@ async def ws_conversation(ws: WebSocket):
                     return {"skipped": True}
                 t1 = time.perf_counter()
 
-                prompt = source_history[-1] if source_history else ""
+                # Continuity prompt: tail of the last few turns, not just one.
+                prompt = " ".join(t for t, _ in turns[-3:])[-STT_PROMPT_CHARS:]
                 text = transcribe(wav_bytes, openai_client, prompt=prompt,
                                   source_lang=source_lang, model=stt_model, glossary=glossary_stt)
                 t2 = time.perf_counter()
@@ -196,20 +263,46 @@ async def ws_conversation(ws: WebSocket):
                              n, (t1 - t0) * 1000, (t2 - t1) * 1000)
                     return {"skipped": True}
 
-                source_history.append(text)
+                # Diarization: one embedding per chunk (each chunk ≈ one turn).
+                speaker = ""
+                sim = -1.0
+                if diarize:
+                    try:
+                        emb = _embedder.embed(wav_bytes)
+                        if emb is not None:
+                            _, speaker, sim = speaker_book.assign(emb)
+                    except Exception as exc:
+                        log.info("#%d diarize skipped (%s)", n, exc)
+
+                turns.append((text, speaker))
+                # Verbatim window: everything the summary hasn't folded yet (so
+                # summary + verbatim always cover the whole conversation), at
+                # least MAX_HISTORY turns, capped at MAX_VERBATIM.
+                start = max(summary_state["upto"], len(turns) - MAX_VERBATIM)
+                start = min(start, max(0, len(turns) - MAX_HISTORY))
+                window = turns[start:]
                 english, repaired = _translate_with_context(
-                    text, source_history[-MAX_HISTORY:], anthropic_client,
+                    text, [t for t, _ in window], anthropic_client,
                     model=model, lang_name=lang_name, context=context, glossary=glossary_prompt,
+                    speaker=speaker, speakers=[sp for _, sp in window], participants=participants,
+                    summary=summary_state["summary"], diarized=diarize,
                 )
                 t3 = time.perf_counter()
 
                 total_ms = int((t3 - t0) * 1000)
                 log.info(
-                    "#%d recv %d bytes | wav %dms | stt %dms %r | mt %dms%s %r | total %dms",
+                    "#%d recv %d bytes | wav %dms | stt %dms %r | %s sim=%.2f | mt %dms%s %r | total %dms",
                     n, len(raw_bytes), (t1 - t0) * 1000, (t2 - t1) * 1000, text[:40],
-                    (t3 - t2) * 1000, " repaired" if repaired else "", (english or "")[:40], total_ms,
+                    speaker or "-", sim, (t3 - t2) * 1000, " repaired" if repaired else "",
+                    (english or "")[:40], total_ms,
                 )
-                return {"source": text, "english": english or "", "ms": total_ms}
+                if session_dir:
+                    save_chunk(n, wav_bytes, {
+                        "seq": n, "ts": time.time(), "speaker": speaker,
+                        "sim": round(sim, 3), "source": text, "english": english or "",
+                        "repaired": repaired, "ms": total_ms,
+                    })
+                return {"source": text, "english": english or "", "speaker": speaker, "ms": total_ms}
 
             result = await loop.run_in_executor(_executor, process, data)
 
@@ -219,11 +312,19 @@ async def ws_conversation(ws: WebSocket):
                 await ws.send_text(json.dumps({
                     "source": result["source"],
                     "english": result["english"],
+                    "speaker": result.get("speaker", ""),
                     "lang_tag": source_lang.upper(),
                     "seq": n,
                     "ts": time.time(),
                     "ms": result["ms"],
                 }))
+                # Fold aging turns into the rolling summary — after the reply is
+                # sent, off the hot path, never overlapping itself.
+                if (len(turns) % SUMMARY_EVERY == 0
+                        and len(turns) > MAX_HISTORY
+                        and not summary_state["busy"]):
+                    summary_state["busy"] = True
+                    _summary_executor.submit(update_summary)
 
     except WebSocketDisconnect:
         log.info("WS disconnected after %d chunks", seq)

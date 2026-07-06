@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """
-Spoken-language-to-English translator.
+Spoken-language-to-English translator (CLI).
+
+NOTE: the web app (server.py + frontend/) is the meeting surface with the full
+quality stack (VAD segmentation, diarization, glossary, cached rich context,
+self-repair). CLI conversation mode below is a simpler fixed-interval mode.
 
 Modes:
-  python3 main.py                           # conversation mode (default): mic always on,
-                                            #   translates every 8s with full context
+  python3 main.py                           # basic conversation mode (default): mic always on,
+                                            #   translates every 8s with rolling context
   python3 main.py --interval 12             # adjust processing interval (seconds)
   python3 main.py --once                    # single utterance, full quality pipeline, then exit
   python3 main.py --text "テキスト"           # translate typed text, full quality pipeline, exit
