@@ -29,6 +29,8 @@ const clearBtn     = document.getElementById('clearBtn');
 const copyBtn      = document.getElementById('copyBtn');
 const jumpLatest   = document.getElementById('jumpLatest');
 
+const interviewRole  = document.getElementById('interviewRole');
+const interviewTerms = document.getElementById('interviewTerms');
 const profileText  = document.getElementById('profileText');
 const profileStatus = document.getElementById('profileStatus');
 const saveProfileBtn = document.getElementById('saveProfileBtn');
@@ -120,8 +122,9 @@ function renderHint(hint, ts) {
   if (!hint || !hint.is_question) return;
   const card = document.createElement('div');
   card.className = 'hint-card';
+  const meta = [ts || '', hint.searched ? 'web' : ''].filter(Boolean).join(' · ');
   card.innerHTML =
-    `<div class="hint-q">${escHtml(hint.gist || 'Question')}<span class="hint-ts">${escHtml(ts || '')}</span></div>` +
+    `<div class="hint-q">${escHtml(hint.gist || 'Question')}<span class="hint-ts">${escHtml(meta)}</span></div>` +
     (hint.bullets || []).map(b => `<div class="hint-bullet">${escHtml(b)}</div>`).join('') +
     (hint.angle ? `<div class="hint-angle">${escHtml(hint.angle)}</div>` : '');
   hintsList.prepend(card);  // newest on top — the one you need right now
@@ -598,10 +601,16 @@ async function startConversation(mode) {
   vadBuf = new Uint8Array(analyser.fftSize);
   src.connect(analyser);
 
-  // Interview sessions run in English; interpret mode uses the picker.
+  // Interview mode is self-contained: English, Sonnet, and its own fields
+  // (role/company + names & terms + profile) — Meeting setup does not apply.
   const isInterview = currentMode === 'interview';
   const langCode = isInterview ? 'en' : sourceLang.value;
   const langName = isInterview ? 'English' : sourceLang.options[sourceLang.selectedIndex].text;
+  const sessionModel = isInterview ? 'sonnet' : modelSel.value;
+  const sessionContext = isInterview ? interviewRole.value.trim() : contextInput.value.trim();
+  const sessionGlossary = isInterview ? interviewTerms.value.trim() : glossaryEl.value.trim();
+  const sessionParticipants = isInterview ? '' : participantsEl.value.trim();
+  const sessionDiarize = isInterview ? true : diarizeEl.checked;
 
   // Session doc + ID token before the socket opens (login is required).
   // The full setup is saved with the meeting so history shows how it was run.
@@ -611,11 +620,11 @@ async function startConversation(mode) {
       mode: currentMode,
       langName,
       sourceLang: langCode,
-      model: modelSel.value,
-      context: contextInput.value.trim(),
-      glossary: glossaryEl.value.trim(),
-      participants: participantsEl.value.trim(),
-      diarize: diarizeEl.checked,
+      model: sessionModel,
+      context: sessionContext,
+      glossary: sessionGlossary,
+      participants: sessionParticipants,
+      diarize: sessionDiarize,
     });
   }
   viewingHistory = false;
@@ -628,13 +637,13 @@ async function startConversation(mode) {
     ws.send(JSON.stringify({
       mode: currentMode,
       profile: isInterview ? profileText.value.trim() : '',
-      model: modelSel.value,
+      model: sessionModel,
       source_lang: langCode,
       lang_name: langName,
-      context: contextInput.value.trim(),
-      glossary: glossaryEl.value.trim(),
-      participants: participantsEl.value.trim(),
-      diarize: diarizeEl.checked,
+      context: sessionContext,
+      glossary: sessionGlossary,
+      participants: sessionParticipants,
+      diarize: sessionDiarize,
       id_token: idToken,
     }));
   };
@@ -690,7 +699,7 @@ async function startConversation(mode) {
   // Live view: setup collapses to the status bar, transcript becomes the hero.
   const modelName = modelSel.options[modelSel.selectedIndex].text.split(' ')[0];
   liveMeta.textContent = isInterview
-    ? `Interview copilot · English · ${modelName}`
+    ? `Interview copilot${sessionContext ? ' · ' + sessionContext : ''}`
     : `${langName} → English · ${modelName}`;
   if (isInterview) {
     hintsList.innerHTML = '';

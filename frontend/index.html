@@ -134,8 +134,20 @@
           </div>
         </div>
 
-        <!-- Interview panel -->
+        <!-- Interview panel (self-contained — does not use Meeting setup) -->
         <div class="panel hidden" id="panel-interview">
+          <div class="control-row">
+            <label class="full-width">
+              Role &amp; company <span class="hint">(steers the hints and any web lookups)</span>
+              <input type="text" id="interviewRole" placeholder="e.g. ML engineer at Acme Robotics" />
+            </label>
+          </div>
+          <div class="control-row">
+            <label class="full-width">
+              Names &amp; terms <span class="hint">(helps recognition — interviewer, company, products)</span>
+              <input type="text" id="interviewTerms" placeholder="e.g. Datadog, Kubernetes, Priya" />
+            </label>
+          </div>
           <details class="control-details" id="profileFold">
             <summary>My profile <span id="profileSummary" class="hint">(CV, bio, projects — grounds the answer hints)</span></summary>
             <textarea id="profileText" rows="10"
@@ -149,6 +161,8 @@
             <input type="checkbox" id="captureTab" checked />
             Capture meeting-tab audio (pick the interview tab when prompted — needed when the interviewer is in your headphones)
           </label>
+          <p class="hint">Interviews run in English and use only the settings above plus your profile —
+            Meeting setup does not apply. Questions the profile can't answer trigger a quick web lookup.</p>
           <div class="btn-row">
             <button id="startInterviewBtn" class="btn btn-primary">● Start interview</button>
             <span id="prepInterviewStatus" class="status-detail"></span>
