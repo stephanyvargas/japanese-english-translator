@@ -9,3 +9,7 @@ venv/
 
 # Firebase deploy cache
 .firebase/
+
+# Eval audio + run outputs (never committed)
+*.mp3
+eval/runs/
