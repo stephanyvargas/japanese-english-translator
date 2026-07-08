@@ -108,10 +108,10 @@ function isPinned() {
   return output.scrollTop >= output.scrollHeight - output.clientHeight - 80;
 }
 
-function appendChunk({ source, english, langTag, speaker, notes, error, lagMs }) {
+function appendChunk({ source, english, langTag, speaker, notes, error, lagMs, ts }) {
   const pinned = isPinned();
   const div = document.createElement('div');
-  const ts = nowStamp();
+  ts = ts || nowStamp();
 
   if (error) {
     div.className = 'turn-error';
@@ -210,20 +210,76 @@ async function renderHistoryList() {
     return;
   }
   historyList.innerHTML = '';
-  sessions.forEach(s => {
-    const when = s.startedAt && s.startedAt.toDate
-      ? s.startedAt.toDate().toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' })
-      : '—';
-    const row = document.createElement('button');
-    row.className = 'history-row';
-    row.innerHTML =
-      `<span class="history-when">${escHtml(when)}</span>` +
-      `<span class="history-desc">${escHtml(s.context || s.langName || 'Meeting')}` +
-      `${s.preview ? ' — ' + escHtml(s.preview) : ''}</span>` +
-      `<span class="history-count">${(s.turns || []).length} turns</span>`;
-    row.addEventListener('click', () => openSession(s.id));
-    historyList.appendChild(row);
+  sessions.forEach(s => historyList.appendChild(historyRow(s)));
+}
+
+function sessionName(s) {
+  return s.title || s.context || s.langName || 'Meeting';
+}
+
+function historyRow(s) {
+  const when = s.startedAt && s.startedAt.toDate
+    ? s.startedAt.toDate().toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' })
+    : '—';
+  const row = document.createElement('div');
+  row.className = 'history-row';
+  row.innerHTML =
+    `<button class="history-open">` +
+    `<span class="history-when">${escHtml(when)}</span>` +
+    `<span class="history-desc"><strong>${escHtml(sessionName(s))}</strong>` +
+    `${s.preview ? ' — ' + escHtml(s.preview) : ''}</span>` +
+    `<span class="history-count">${(s.turns || []).length} turns</span>` +
+    `</button>` +
+    `<button class="history-action" data-act="rename" title="Rename">Rename</button>` +
+    `<button class="history-action history-action-danger" data-act="delete" title="Delete">Delete</button>`;
+
+  row.querySelector('.history-open').addEventListener('click', () => openSession(s.id));
+
+  row.querySelector('[data-act="rename"]').addEventListener('click', () => {
+    const desc = row.querySelector('.history-desc');
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'history-rename';
+    input.value = s.title || '';
+    input.placeholder = 'Meeting title, e.g. Sales meeting';
+    desc.replaceWith(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const finish = async (save) => {
+      if (done) return;
+      done = true;
+      if (save && input.value.trim() && input.value.trim() !== s.title) {
+        try {
+          await window.store.renameSession(s.id, input.value);
+          s.title = input.value.trim();
+        } catch (err) {
+          console.warn('rename failed:', err);
+        }
+      }
+      row.replaceWith(historyRow(s));
+    };
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') finish(true);
+      if (e.key === 'Escape') finish(false);
+    });
+    input.addEventListener('blur', () => finish(true));
   });
+
+  row.querySelector('[data-act="delete"]').addEventListener('click', async () => {
+    if (!window.confirm(`Delete “${sessionName(s)}” and its transcript? This cannot be undone.`)) return;
+    try {
+      await window.store.deleteSession(s.id);
+      row.remove();
+      if (!historyList.children.length) {
+        historyList.innerHTML = '<p class="hint">No saved meetings yet — run one and it will appear here.</p>';
+      }
+    } catch (err) {
+      console.warn('delete failed:', err);
+    }
+  });
+
+  return row;
 }
 
 async function openSession(id) {
@@ -234,12 +290,21 @@ async function openSession(id) {
   transcript = [];
   speakerIndex = {};
   const when = s.startedAt && s.startedAt.toDate ? s.startedAt.toDate().toLocaleString('en-GB') : '';
-  viewingLabel.textContent = `Viewing past meeting${when ? ' · ' + when : ''}`;
+  const terms = (s.glossary || '').split('\n').filter(l => l.trim()).length;
+  const meta = [
+    `${s.langName || 'Japanese'} → English`,
+    s.model || '',
+    s.context && s.title ? s.context : '',
+    terms ? `${terms} key terms` : '',
+    s.participants ? `participants: ${s.participants.split('\n').filter(Boolean).join(', ')}` : '',
+  ].filter(Boolean).join(' · ');
+  viewingLabel.innerHTML =
+    `<strong>${escHtml(sessionName(s))}</strong>${when ? ' · ' + escHtml(when) : ''}` +
+    `<span class="viewing-meta">${escHtml(meta)}</span>`;
   viewingStrip.classList.remove('hidden');
   (s.turns || []).forEach(t => {
-    appendChunk({ source: t.source, english: t.english, speaker: t.speaker, langTag: t.langTag || 'JA' });
-    // appendChunk stamps the current time; keep the stored timestamp for Copy minutes.
-    if (transcript.length) transcript[transcript.length - 1].ts = t.ts || transcript[transcript.length - 1].ts;
+    appendChunk({ source: t.source, english: t.english, speaker: t.speaker,
+                  langTag: t.langTag || 'JA', ts: t.ts });
   });
   output.scrollTop = 0;
 }
@@ -295,7 +360,9 @@ translateBtn.addEventListener('click', async () => {
     if (window.store && !textSessionId) {
       textSessionId = await window.store.startSession({
         langName: sourceLang.options[sourceLang.selectedIndex].text,
-        model: modelSel.value, context: 'Typed text', participants: '',
+        sourceLang: sourceLang.value,
+        model: modelSel.value, context: 'Typed text',
+        glossary: glossaryEl.value.trim(), participants: '', diarize: false,
       });
     }
     saveTurn(textSessionId, {
@@ -392,13 +459,17 @@ async function startConversation() {
   src.connect(analyser);
 
   // Session doc + ID token before the socket opens (login is required).
+  // The full setup is saved with the meeting so history shows how it was run.
   const idToken = window.store ? await window.store.idToken() : '';
   if (window.store) {
     liveSessionId = await window.store.startSession({
       langName: sourceLang.options[sourceLang.selectedIndex].text,
+      sourceLang: sourceLang.value,
       model: modelSel.value,
       context: contextInput.value.trim(),
+      glossary: glossaryEl.value.trim(),
       participants: participantsEl.value.trim(),
+      diarize: diarizeEl.checked,
     });
   }
   viewingHistory = false;

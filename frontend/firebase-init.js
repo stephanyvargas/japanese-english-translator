@@ -8,7 +8,7 @@ import {
   getAuth, GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signOut,
 } from 'https://www.gstatic.com/firebasejs/11.0.2/firebase-auth.js';
 import {
-  addDoc, arrayUnion, collection, doc, getDoc, getDocs, getFirestore,
+  addDoc, arrayUnion, collection, deleteDoc, doc, getDoc, getDocs, getFirestore,
   limit, orderBy, query, serverTimestamp, updateDoc,
 } from 'https://www.gstatic.com/firebasejs/11.0.2/firebase-firestore.js';
 
@@ -76,6 +76,14 @@ window.store = {
     } catch (err) {
       console.warn('endSession failed:', err);
     }
+  },
+
+  async renameSession(sessionId, title) {
+    await updateDoc(doc(sessionsCol(), sessionId), { title: title.trim() });
+  },
+
+  async deleteSession(sessionId) {
+    await deleteDoc(doc(sessionsCol(), sessionId));
   },
 
   // ── history retrieval ─────────────────────────────────────────────────────

@@ -473,9 +473,16 @@ body.signed-out .status-bar { display: none; }
 
 .history-row {
   display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.history-open {
+  display: flex;
   align-items: baseline;
   gap: 12px;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   background: var(--washi);
   border: 1px solid var(--line);
   border-radius: 4px;
@@ -487,7 +494,28 @@ body.signed-out .status-bar { display: none; }
   text-align: left;
 }
 
-.history-row:hover { border-color: var(--ai); }
+.history-open:hover { border-color: var(--ai); }
+
+.history-action {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--nezumi);
+  cursor: pointer;
+  font-family: var(--sans);
+  font-size: 0.75rem;
+  padding: 0 10px;
+}
+
+.history-action:hover { color: var(--sumi); border-color: var(--nezumi); }
+.history-action-danger:hover { color: var(--shu); border-color: var(--shu); }
+
+.history-rename {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.88rem;
+  padding: 4px 8px;
+}
 
 .history-when {
   font-family: var(--mono);
@@ -514,12 +542,21 @@ body.signed-out .status-bar { display: none; }
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   background: var(--paper2);
   border: 1px solid var(--line);
   border-radius: 4px;
   padding: 8px 14px;
   font-size: 0.85rem;
   color: var(--nezumi);
+}
+
+.viewing-strip strong { color: var(--sumi); font-weight: 600; }
+
+.viewing-meta {
+  display: block;
+  font-size: 0.78rem;
+  margin-top: 2px;
 }
 
 /* ── Responsive ─────────────────────────────────────────────────────────── */
