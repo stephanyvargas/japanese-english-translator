@@ -39,6 +39,7 @@ from eval.common import (  # noqa: E402
     RunStopped, append_jsonl, call_with_budget_guard, load_jsonl,
     read_run_state, write_run_state,
 )
+from translator.assembler import ChunkAssembler  # noqa: E402
 from translator.diarizer import SpeakerBook, SpeakerEmbedder  # noqa: E402
 from translator.glossary import Glossary  # noqa: E402
 from translator.pipeline import _label, _summarize_history, _translate_with_context  # noqa: E402
