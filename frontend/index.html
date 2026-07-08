@@ -3,107 +3,132 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Language → English Translator</title>
+  <title>Meeting Interpreter</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+JP:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=Shippori+Mincho:wght@600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <div class="app">
-    <header>
-      <h1>Language &rarr; English Translator</h1>
-      <p class="subtitle">Powered by Claude + Whisper</p>
+
+    <header class="masthead">
+      <span class="mark" lang="ja">通訳</span>
+      <h1>Meeting Interpreter</h1>
+      <span id="seal" class="seal" aria-hidden="true"></span>
     </header>
 
-    <section class="controls">
-      <div class="control-row">
-        <label>
-          Language
-          <select id="sourceLang">
-            <option value="ja">Japanese</option>
-            <option value="ko">Korean</option>
-            <option value="zh">Chinese</option>
-            <option value="es">Spanish</option>
-            <option value="fr">French</option>
-            <option value="de">German</option>
-            <option value="pt">Portuguese</option>
-            <option value="it">Italian</option>
-            <option value="ru">Russian</option>
-            <option value="ar">Arabic</option>
-          </select>
-        </label>
-        <label>
-          Model
-          <select id="model">
-            <option value="sonnet">Sonnet (balanced)</option>
-            <option value="opus">Opus (highest quality)</option>
-            <option value="haiku">Haiku (fastest)</option>
-          </select>
-        </label>
+    <!-- Live status bar (visible only while a meeting is running) -->
+    <div id="statusBar" class="status-bar" role="status">
+      <span class="status-live"><span class="seal seal-live" aria-hidden="true"></span>LIVE</span>
+      <span id="liveMeta" class="status-meta">Japanese → English</span>
+      <span id="elapsed" class="status-elapsed">00:00:00</span>
+      <span id="convStatus" class="status-detail"></span>
+      <button id="stopBtn" class="btn btn-end" disabled>End meeting</button>
+    </div>
+
+    <!-- Prepare view -->
+    <section id="setup" class="setup">
+      <div class="tabs" role="tablist">
+        <button class="tab active" data-tab="conversation" role="tab">Live meeting</button>
+        <button class="tab" data-tab="text" role="tab">Type text</button>
       </div>
-      <div class="control-row">
-        <label class="full-width">
-          Context <span class="hint">(optional — e.g. "business meeting", "bank appointment")</span>
-          <input type="text" id="context" placeholder="Describe the setting..." />
-        </label>
-      </div>
-      <details class="control-row">
-        <summary>Key terms / names <span class="hint">(optional — pins how names &amp; jargon are rendered)</span></summary>
-        <textarea id="glossary" rows="3"
-          placeholder="One per line:&#10;田中 => Tanaka&#10;弊社 => our company&#10;ROE"></textarea>
-        <label class="checkbox-label">
-          <input type="checkbox" id="verify" /> Verify with back-translation (text mode, slower/higher quality)
-        </label>
-      </details>
-      <details class="control-row">
-        <summary>Participants <span class="hint">(optional — conversation mode: label who is speaking)</span></summary>
-        <textarea id="participants" rows="3"
-          placeholder="One name per line, in likely speaking order:&#10;Tanaka&#10;Suzuki"></textarea>
-        <label class="checkbox-label">
-          <input type="checkbox" id="diarize" checked /> Detect speakers (diarization)
-        </label>
-      </details>
-      <div class="control-row">
-        <label>
-          Backend URL
-          <input type="text" id="backendUrl" value="https://translator-backend-1029193548741.asia-northeast1.run.app" />
-        </label>
+
+      <div class="setup-card">
+        <div class="control-row">
+          <label>
+            Language
+            <select id="sourceLang">
+              <option value="ja">Japanese</option>
+              <option value="ko">Korean</option>
+              <option value="zh">Chinese</option>
+              <option value="es">Spanish</option>
+              <option value="fr">French</option>
+              <option value="de">German</option>
+              <option value="pt">Portuguese</option>
+              <option value="it">Italian</option>
+              <option value="ru">Russian</option>
+              <option value="ar">Arabic</option>
+            </select>
+          </label>
+          <label>
+            Model
+            <select id="model">
+              <option value="sonnet">Sonnet (balanced)</option>
+              <option value="opus">Opus (highest quality)</option>
+              <option value="haiku">Haiku (fastest)</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="control-row">
+          <label class="full-width">
+            Setting <span class="hint">(optional — "weekly sync", "bank appointment")</span>
+            <input type="text" id="context" placeholder="What kind of meeting is this?" />
+          </label>
+        </div>
+
+        <details class="control-details">
+          <summary>Key terms &amp; names <span class="hint">(pins how names and jargon are rendered)</span></summary>
+          <textarea id="glossary" rows="3"
+            placeholder="One per line:&#10;田中 => Tanaka&#10;弊社 => our company&#10;ROE"></textarea>
+          <label class="checkbox-label">
+            <input type="checkbox" id="verify" /> Verify with back-translation (typed text only, slower)
+          </label>
+        </details>
+
+        <details class="control-details">
+          <summary>Participants <span class="hint">(labels who is speaking)</span></summary>
+          <textarea id="participants" rows="3"
+            placeholder="One name per line, in likely speaking order:&#10;Tanaka&#10;Suzuki"></textarea>
+          <label class="checkbox-label">
+            <input type="checkbox" id="diarize" checked /> Detect speakers
+          </label>
+        </details>
+
+        <details class="control-details">
+          <summary>Connection</summary>
+          <label class="full-width">
+            Backend URL
+            <input type="text" id="backendUrl" class="mono" value="https://translator-backend-1029193548741.asia-northeast1.run.app" />
+          </label>
+        </details>
+
+        <!-- Live meeting panel -->
+        <div class="panel" id="panel-conversation">
+          <div class="btn-row">
+            <button id="startBtn" class="btn btn-primary">● Start meeting</button>
+            <span id="prepStatus" class="status-detail"></span>
+          </div>
+        </div>
+
+        <!-- Text panel -->
+        <div class="panel hidden" id="panel-text">
+          <textarea id="textInput" rows="4" placeholder="Paste or type text to translate…"></textarea>
+          <div class="btn-row">
+            <button id="translateBtn" class="btn btn-primary">Translate</button>
+            <label class="checkbox-label">
+              <input type="checkbox" id="showNotes" /> Show translator notes
+            </label>
+            <span id="textStatus" class="status-detail"></span>
+          </div>
+        </div>
       </div>
     </section>
 
-    <section class="tabs">
-      <button class="tab active" data-tab="conversation">Conversation</button>
-      <button class="tab" data-tab="text">Type text</button>
+    <!-- Transcript -->
+    <section class="transcript-section">
+      <div class="transcript-header">
+        <span class="transcript-title">Transcript</span>
+        <span class="transcript-actions">
+          <button id="copyBtn" class="btn btn-small">Copy minutes</button>
+          <button id="clearBtn" class="btn btn-small">Clear</button>
+        </span>
+      </div>
+      <div id="output" class="transcript" tabindex="0"></div>
+      <button id="jumpLatest" class="jump-latest hidden">↓ Jump to latest</button>
     </section>
 
-    <!-- Conversation mode -->
-    <section class="panel" id="panel-conversation">
-      <p class="hint">The mic segments on natural pauses and streams translations as you speak.</p>
-      <div class="btn-row">
-        <button id="startBtn" class="btn btn-primary">&#9679; Start</button>
-        <button id="stopBtn" class="btn btn-danger" disabled>&#9632; Stop</button>
-        <span id="convStatus" class="status"></span>
-      </div>
-    </section>
-
-    <!-- Text mode -->
-    <section class="panel hidden" id="panel-text">
-      <textarea id="textInput" rows="4" placeholder="Paste or type text here..."></textarea>
-      <div class="btn-row">
-        <button id="translateBtn" class="btn btn-primary">Translate</button>
-        <label class="checkbox-label">
-          <input type="checkbox" id="showNotes" /> Show translator notes
-        </label>
-        <span id="textStatus" class="status"></span>
-      </div>
-    </section>
-
-    <!-- Output -->
-    <section class="output-section">
-      <div class="output-header">
-        <span>Output</span>
-        <button id="clearBtn" class="btn btn-small">Clear</button>
-      </div>
-      <div id="output" class="output"></div>
-    </section>
   </div>
 
   <script src="app.js"></script>

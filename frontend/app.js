@@ -15,6 +15,9 @@ const panels       = document.querySelectorAll('.panel');
 const startBtn     = document.getElementById('startBtn');
 const stopBtn      = document.getElementById('stopBtn');
 const convStatus   = document.getElementById('convStatus');
+const prepStatus   = document.getElementById('prepStatus');
+const liveMeta     = document.getElementById('liveMeta');
+const elapsedEl    = document.getElementById('elapsed');
 
 const textInput    = document.getElementById('textInput');
 const translateBtn = document.getElementById('translateBtn');
@@ -23,6 +26,8 @@ const textStatus   = document.getElementById('textStatus');
 
 const output       = document.getElementById('output');
 const clearBtn     = document.getElementById('clearBtn');
+const copyBtn      = document.getElementById('copyBtn');
+const jumpLatest   = document.getElementById('jumpLatest');
 
 // ── Tab switching ─────────────────────────────────────────────────────────────
 
@@ -45,33 +50,58 @@ function nowStamp() {
   return new Date().toLocaleTimeString('en-GB'); // HH:MM:SS
 }
 
-// Stable per-speaker color, assigned in first-appearance order.
+// Speaker rail palette (ink-adjacent), assigned in first-appearance order.
 // Reset on each new conversation so colors track the new session's speakers.
-const speakerColors = ['#4a9dff', '#4ecb7a', '#e0a13a', '#c471d6', '#e0655a', '#3ec3c3'];
+const speakerColors = ['#2B4C7E', '#3E6B4F', '#7A4A6D', '#A8762C', '#2F6E75', '#6E4A32'];
 let speakerIndex = {};
-function speakerTag(speaker) {
+function railColor(speaker) {
   if (!speaker) return '';
   if (!(speaker in speakerIndex)) speakerIndex[speaker] = Object.keys(speakerIndex).length;
-  const color = speakerColors[speakerIndex[speaker] % speakerColors.length];
-  return `<span class="speaker" style="color:${color}">${escHtml(speaker)}</span> `;
+  return speakerColors[speakerIndex[speaker] % speakerColors.length];
+}
+
+// Everything rendered, kept for "Copy minutes".
+let transcript = [];
+
+// Only auto-scroll when the reader is already pinned to the bottom.
+function isPinned() {
+  return output.scrollTop >= output.scrollHeight - output.clientHeight - 80;
 }
 
 function appendChunk({ source, english, langTag, speaker, notes, error, lagMs }) {
+  const pinned = isPinned();
   const div = document.createElement('div');
-  div.className = 'chunk';
   const ts = nowStamp();
-  const lag = lagMs != null ? ` (${(lagMs / 1000).toFixed(1)}s)` : '';
+
   if (error) {
-    div.innerHTML = `<span class="error">[${ts}] Error: ${escHtml(error)}</span>`;
+    div.className = 'turn-error';
+    div.innerHTML = `[${ts}] ${escHtml(error)}`;
   } else {
-    if (source) div.innerHTML += `<span class="source">[${ts}] ${speakerTag(speaker)}[${escHtml(langTag || '??')}] ${escHtml(source)}</span>`;
-    if (english) div.innerHTML += `<span class="english">[EN]${lag} ${escHtml(english)}</span>`;
-    if (notes && notes.length) {
-      div.innerHTML += notes.map(n => `<span class="notes">* ${escHtml(n)}</span>`).join('');
-    }
+    div.className = 'turn';
+    const color = railColor(speaker);
+    if (color) div.style.setProperty('--rail', color);
+    const lag = lagMs != null ? ` · ${(lagMs / 1000).toFixed(1)}s` : '';
+    const speakerHtml = speaker ? `<span class="turn-speaker">${escHtml(speaker)}</span>` : '';
+    const noteHtml = (notes && notes.length)
+      ? notes.map(n => `<span class="note">* ${escHtml(n)}</span>`).join('')
+      : '';
+    div.innerHTML =
+      `<div class="turn-meta">${ts}${speakerHtml ? ' ' : ''}${speakerHtml}` +
+      `<span>${escHtml(langTag || '')}${lag}</span></div>` +
+      `<div class="turn-body">` +
+      (source ? `<span class="ja" lang="${escHtml((langTag || 'ja').toLowerCase())}">${escHtml(source)}</span>` : '') +
+      (english ? `<span class="en">${escHtml(english)}</span>` : '') +
+      noteHtml +
+      `</div>`;
+    transcript.push({ ts, speaker: speaker || '', source: source || '', english: english || '' });
   }
+
   output.appendChild(div);
-  output.scrollTop = output.scrollHeight;
+  if (pinned) {
+    output.scrollTop = output.scrollHeight;
+  } else {
+    jumpLatest.classList.remove('hidden');
+  }
 }
 
 function escHtml(str) {
@@ -82,6 +112,39 @@ function escHtml(str) {
     .replace(/"/g, '&quot;');
 }
 
+// ── Transcript actions ────────────────────────────────────────────────────────
+
+output.addEventListener('scroll', () => {
+  if (isPinned()) jumpLatest.classList.add('hidden');
+});
+
+jumpLatest.addEventListener('click', () => {
+  output.scrollTop = output.scrollHeight;
+  jumpLatest.classList.add('hidden');
+});
+
+copyBtn.addEventListener('click', async () => {
+  if (!transcript.length) return;
+  const text = transcript.map(t => {
+    const head = `[${t.ts}]${t.speaker ? ' ' + t.speaker : ''}`;
+    return [head, t.source, t.english].filter(Boolean).join('\n');
+  }).join('\n\n');
+  try {
+    await navigator.clipboard.writeText(text);
+    copyBtn.textContent = 'Copied';
+    setTimeout(() => { copyBtn.textContent = 'Copy minutes'; }, 1500);
+  } catch {
+    copyBtn.textContent = 'Copy failed';
+    setTimeout(() => { copyBtn.textContent = 'Copy minutes'; }, 1500);
+  }
+});
+
+clearBtn.addEventListener('click', () => {
+  output.innerHTML = '';
+  transcript = [];
+  jumpLatest.classList.add('hidden');
+});
+
 // ── Text mode ─────────────────────────────────────────────────────────────────
 
 translateBtn.addEventListener('click', async () => {
@@ -89,7 +152,7 @@ translateBtn.addEventListener('click', async () => {
   if (!text) return;
 
   translateBtn.disabled = true;
-  textStatus.textContent = 'Translating...';
+  textStatus.textContent = 'Translating…';
 
   try {
     const res = await fetch(`${apiBase()}/translate`, {
@@ -157,17 +220,25 @@ let pendingChunk = null;
 let sentAt = 0;
 let dropped = 0;
 
+// Elapsed-time ticker for the live status bar.
+let meetingStart = 0;
+let elapsedTimer = null;
+
 startBtn.addEventListener('click', startConversation);
 stopBtn.addEventListener('click', stopConversation);
 
 function setStatus() {
-  if (!active) { convStatus.textContent = 'Stopped'; return; }
+  if (!active) { convStatus.textContent = ''; return; }
   const drop = dropped > 0 ? ` · dropped ${dropped}` : '';
-  if (inFlight) {
-    convStatus.innerHTML = `<span class="recording-dot"></span>Processing…${drop}`;
-  } else {
-    convStatus.innerHTML = `<span class="recording-dot"></span>Live${drop}`;
-  }
+  convStatus.textContent = (inFlight ? 'Translating…' : 'Listening…') + drop;
+}
+
+function tickElapsed() {
+  const s = Math.floor((Date.now() - meetingStart) / 1000);
+  const hh = String(Math.floor(s / 3600)).padStart(2, '0');
+  const mm = String(Math.floor((s % 3600) / 60)).padStart(2, '0');
+  const ss = String(s % 60).padStart(2, '0');
+  elapsedEl.textContent = `${hh}:${mm}:${ss}`;
 }
 
 function trySend() {
@@ -182,10 +253,11 @@ function trySend() {
 }
 
 async function startConversation() {
+  prepStatus.textContent = '';
   try {
     activeStream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (err) {
-    convStatus.textContent = 'Mic access denied';
+    prepStatus.textContent = 'Microphone access was denied — allow the mic and try again.';
     return;
   }
 
@@ -235,7 +307,9 @@ async function startConversation() {
     trySend();
   };
 
-  ws.onerror = () => { convStatus.textContent = 'WebSocket error'; };
+  ws.onerror = () => {
+    appendChunk({ error: 'Connection lost — press “Start meeting” to reconnect.' });
+  };
   ws.onclose = () => { if (active) stopConversation(); };
 
   active = true;
@@ -245,6 +319,15 @@ async function startConversation() {
   speakerIndex = {};  // fresh session → fresh first-appearance color order
   startBtn.disabled = true;
   stopBtn.disabled = false;
+
+  // Live view: setup collapses to the status bar, transcript becomes the hero.
+  const langName = sourceLang.options[sourceLang.selectedIndex].text;
+  const modelName = modelSel.options[modelSel.selectedIndex].text.split(' ')[0];
+  liveMeta.textContent = `${langName} → English · ${modelName}`;
+  document.body.classList.add('live');
+  meetingStart = Date.now();
+  tickElapsed();
+  elapsedTimer = setInterval(tickElapsed, 1000);
   setStatus();
 
   // Cycle stop/start so each recording is a complete, self-contained WebM file.
@@ -313,11 +396,9 @@ function stopConversation() {
   }
   if (audioCtx) { audioCtx.close(); audioCtx = null; analyser = null; vadBuf = null; }
   if (ws) { ws.close(); ws = null; }
+  if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+  document.body.classList.remove('live');
   startBtn.disabled = false;
   stopBtn.disabled = true;
-  convStatus.textContent = 'Stopped';
+  convStatus.textContent = '';
 }
-
-// ── Clear output ──────────────────────────────────────────────────────────────
-
-clearBtn.addEventListener('click', () => { output.innerHTML = ''; });
