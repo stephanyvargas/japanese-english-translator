@@ -232,6 +232,26 @@ label.full-width { flex: 100%; }
 
 .control-details textarea { font-family: var(--mono); font-size: 0.85rem; }
 
+/* The whole meeting setup collapses to one line (state remembered). */
+.setup-fold > summary {
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--sumi);
+  letter-spacing: 0.02em;
+}
+
+.setup-fold > summary .hint { font-weight: 400; margin-left: 6px; }
+.setup-fold > summary:hover { color: var(--ai); }
+
+.setup-fold[open] > summary { margin-bottom: 16px; }
+
+.setup-fold[open] {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
 select, input[type="text"], textarea {
   background: var(--washi);
   border: 1px solid var(--line);

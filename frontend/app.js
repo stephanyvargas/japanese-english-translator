@@ -80,6 +80,32 @@ tabs.forEach(tab => {
   });
 });
 
+// ── Meeting setup fold ────────────────────────────────────────────────────────
+// The setup form collapses to one line; the summary always shows what a meeting
+// would run with. Open/closed is remembered across visits (default: collapsed).
+
+const setupFold    = document.getElementById('setupFold');
+const setupSummary = document.getElementById('setupSummary');
+
+function updateSetupSummary() {
+  const lang = sourceLang.options[sourceLang.selectedIndex].text;
+  const model = modelSel.options[modelSel.selectedIndex].text.split(' ')[0];
+  const parts = [`${lang} → English`, model];
+  if (contextInput.value.trim()) parts.push(contextInput.value.trim());
+  const terms = glossaryEl.value.split('\n').filter(l => l.trim()).length;
+  if (terms) parts.push(`${terms} key terms`);
+  setupSummary.textContent = parts.join(' · ');
+}
+
+[sourceLang, modelSel].forEach(el => el.addEventListener('change', updateSetupSummary));
+[contextInput, glossaryEl].forEach(el => el.addEventListener('input', updateSetupSummary));
+updateSetupSummary();
+
+setupFold.open = localStorage.getItem('setupOpen') === '1';
+setupFold.addEventListener('toggle', () => {
+  localStorage.setItem('setupOpen', setupFold.open ? '1' : '');
+});
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function apiBase() {
