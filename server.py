@@ -32,6 +32,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("translator")
 
+from translator.assembler import ChunkAssembler  # noqa: E402
 from translator.diarizer import SpeakerBook, SpeakerEmbedder  # noqa: E402
 from translator.glossary import Glossary  # noqa: E402
 from translator.pipeline import _label, _summarize_history, _translate_with_context, run  # noqa: E402
@@ -271,10 +272,87 @@ async def ws_conversation(ws: WebSocket):
     log.info("WS connected | uid=%s model=%s stt=%s lang=%s context=%r terms=%d diarize=%s participants=%d",
              uid or "-", model, stt_model, source_lang, context, len(glossary), diarize, len(names))
 
+    # Sentence assembly: mid-sentence chunks are buffered and joined with what
+    # follows, so fragments aren't translated in isolation. pending_wav keeps
+    # the newest buffered chunk's audio for diarization at flush time.
+    assembler = ChunkAssembler()
+    pending_wav = {"wav": b""}
+
+    def translate_turn(n: int, text: str, wav_bytes: bytes, t0: float,
+                       stt_ms: int, merged: int) -> dict:
+        """Diarize + translate an assembled sentence; log and record it."""
+        speaker = ""
+        sim = -1.0
+        if diarize:
+            try:
+                emb = _embedder.embed(wav_bytes)
+                if emb is not None:
+                    _, speaker, sim = speaker_book.assign(emb)
+            except Exception as exc:
+                log.info("#%d diarize skipped (%s)", n, exc)
+
+        turns.append((text, speaker))
+        # Verbatim window: everything the summary hasn't folded yet (so
+        # summary + verbatim always cover the whole conversation), at
+        # least MAX_HISTORY turns, capped at MAX_VERBATIM.
+        start = max(summary_state["upto"], len(turns) - MAX_VERBATIM)
+        start = min(start, max(0, len(turns) - MAX_HISTORY))
+        window = turns[start:]
+        english, repaired = _translate_with_context(
+            text, [t for t, _ in window], anthropic_client,
+            model=model, lang_name=lang_name, context=context, glossary=glossary_prompt,
+            speaker=speaker, speakers=[sp for _, sp in window], participants=participants,
+            summary=summary_state["summary"], diarized=diarize,
+        )
+        t3 = time.perf_counter()
+
+        total_ms = int((t3 - t0) * 1000)
+        log.info(
+            "#%d stt %dms %r | merged=%d | %s sim=%.2f | mt %dms%s %r | total %dms",
+            n, stt_ms, text[:40], merged, speaker or "-", sim,
+            (t3 - t0) * 1000 - stt_ms, " repaired" if repaired else "",
+            (english or "")[:40], total_ms,
+        )
+        if session_dir:
+            save_chunk(n, wav_bytes, {
+                "seq": n, "ts": time.time(), "speaker": speaker,
+                "sim": round(sim, 3), "source": text, "english": english or "",
+                "repaired": repaired, "ms": total_ms, "merged": merged,
+            })
+        return {"source": text, "english": english or "", "speaker": speaker, "ms": total_ms}
+
+    def flush_pending(n: int) -> dict:
+        """Speaker went silent mid-buffer — translate what's pending as-is."""
+        text = assembler.flush()
+        if not text:
+            return {"skipped": True}
+        return translate_turn(n, text, pending_wav["wav"], time.perf_counter(),
+                              0, assembler.last_merged)
+
     try:
         while True:
-            # Receive binary audio frame (WAV bytes from browser MediaRecorder)
-            data = await ws.receive_bytes()
+            # Receive binary audio frame (WAV bytes from browser MediaRecorder).
+            # While a partial sentence is buffered, wait at most 6s — a silent
+            # speaker means the sentence won't be continued, so flush it.
+            if assembler.pending:
+                try:
+                    data = await asyncio.wait_for(ws.receive_bytes(), timeout=6)
+                except asyncio.TimeoutError:
+                    seq += 1
+                    result = await loop.run_in_executor(_executor, flush_pending, seq)
+                    if not result.get("skipped"):
+                        await ws.send_text(json.dumps({
+                            "source": result["source"],
+                            "english": result["english"],
+                            "speaker": result.get("speaker", ""),
+                            "lang_tag": source_lang.upper(),
+                            "seq": seq,
+                            "ts": time.time(),
+                            "ms": result["ms"],
+                        }))
+                    continue
+            else:
+                data = await ws.receive_bytes()
             seq += 1
             n = seq
 
@@ -296,55 +374,29 @@ async def ws_conversation(ws: WebSocket):
                 text = transcribe(wav_bytes, openai_client, prompt=prompt,
                                   source_lang=source_lang, model=stt_model, glossary=glossary_stt)
                 t2 = time.perf_counter()
+                stt_ms = int((t2 - t1) * 1000)
                 if not text.strip():
                     log.info("#%d skipped (no speech) | wav %dms | stt %dms",
-                             n, (t1 - t0) * 1000, (t2 - t1) * 1000)
+                             n, (t1 - t0) * 1000, stt_ms)
                     return {"skipped": True}
 
-                # Diarization: one embedding per chunk (each chunk ≈ one turn).
-                speaker = ""
-                sim = -1.0
-                if diarize:
-                    try:
-                        emb = _embedder.embed(wav_bytes)
-                        if emb is not None:
-                            _, speaker, sim = speaker_book.assign(emb)
-                    except Exception as exc:
-                        log.info("#%d diarize skipped (%s)", n, exc)
+                # Sentence assembly: hold visibly mid-sentence chunks and join
+                # them with what follows (or the 6s silence flush above).
+                dur_s = max(0.0, (len(wav_bytes) - 44) / 2 / 16000)
+                pending_wav["wav"] = wav_bytes
+                assembled = assembler.add(text, dur_s)
+                if assembled is None:
+                    log.info("#%d buffered (mid-sentence) %r", n, text[:40])
+                    return {"buffered": True}
 
-                turns.append((text, speaker))
-                # Verbatim window: everything the summary hasn't folded yet (so
-                # summary + verbatim always cover the whole conversation), at
-                # least MAX_HISTORY turns, capped at MAX_VERBATIM.
-                start = max(summary_state["upto"], len(turns) - MAX_VERBATIM)
-                start = min(start, max(0, len(turns) - MAX_HISTORY))
-                window = turns[start:]
-                english, repaired = _translate_with_context(
-                    text, [t for t, _ in window], anthropic_client,
-                    model=model, lang_name=lang_name, context=context, glossary=glossary_prompt,
-                    speaker=speaker, speakers=[sp for _, sp in window], participants=participants,
-                    summary=summary_state["summary"], diarized=diarize,
-                )
-                t3 = time.perf_counter()
-
-                total_ms = int((t3 - t0) * 1000)
-                log.info(
-                    "#%d recv %d bytes | wav %dms | stt %dms %r | %s sim=%.2f | mt %dms%s %r | total %dms",
-                    n, len(raw_bytes), (t1 - t0) * 1000, (t2 - t1) * 1000, text[:40],
-                    speaker or "-", sim, (t3 - t2) * 1000, " repaired" if repaired else "",
-                    (english or "")[:40], total_ms,
-                )
-                if session_dir:
-                    save_chunk(n, wav_bytes, {
-                        "seq": n, "ts": time.time(), "speaker": speaker,
-                        "sim": round(sim, 3), "source": text, "english": english or "",
-                        "repaired": repaired, "ms": total_ms,
-                    })
-                return {"source": text, "english": english or "", "speaker": speaker, "ms": total_ms}
+                return translate_turn(n, assembled, wav_bytes, t0, stt_ms,
+                                      assembler.last_merged)
 
             result = await loop.run_in_executor(_executor, process, data)
 
-            if result.get("skipped"):
+            if result.get("buffered"):
+                await ws.send_text(json.dumps({"buffered": True, "skipped": True, "seq": n}))
+            elif result.get("skipped"):
                 await ws.send_text(json.dumps({"skipped": True, "seq": n}))
             else:
                 await ws.send_text(json.dumps({

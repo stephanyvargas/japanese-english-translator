@@ -108,35 +108,66 @@ function isPinned() {
   return output.scrollTop >= output.scrollHeight - output.clientHeight - 80;
 }
 
+// Turn grouping: consecutive pairs from the same speaker within GROUP_GAP_MS
+// merge into one block (one meta line, sentences flowing under one rail) —
+// otherwise a talkative speaker becomes a wall of tiny timestamped blocks.
+const GROUP_GAP_MS = 20000;
+const GROUP_MAX_PAIRS = 6;
+let lastTurn = null; // { speaker, wallMs, pairs, bodyEl }
+
+function resetTurnGrouping() { lastTurn = null; }
+
+function pairHtml(source, english, langTag, notes) {
+  const noteHtml = (notes && notes.length)
+    ? notes.map(n => `<span class="note">* ${escHtml(n)}</span>`).join('')
+    : '';
+  return (source ? `<span class="ja" lang="${escHtml((langTag || 'ja').toLowerCase())}">${escHtml(source)}</span>` : '')
+    + (english ? `<span class="en">${escHtml(english)}</span>` : '')
+    + noteHtml;
+}
+
 function appendChunk({ source, english, langTag, speaker, notes, error, lagMs, ts }) {
   const pinned = isPinned();
-  const div = document.createElement('div');
   ts = ts || nowStamp();
 
   if (error) {
+    const div = document.createElement('div');
     div.className = 'turn-error';
     div.innerHTML = `[${ts}] ${escHtml(error)}`;
+    output.appendChild(div);
+    resetTurnGrouping();
   } else {
-    div.className = 'turn';
-    const color = railColor(speaker);
-    if (color) div.style.setProperty('--rail', color);
-    const lag = lagMs != null ? ` · ${(lagMs / 1000).toFixed(1)}s` : '';
-    const speakerHtml = speaker ? `<span class="turn-speaker">${escHtml(speaker)}</span>` : '';
-    const noteHtml = (notes && notes.length)
-      ? notes.map(n => `<span class="note">* ${escHtml(n)}</span>`).join('')
-      : '';
-    div.innerHTML =
-      `<div class="turn-meta">${ts}${speakerHtml ? ' ' : ''}${speakerHtml}` +
-      `<span>${escHtml(langTag || '')}${lag}</span></div>` +
-      `<div class="turn-body">` +
-      (source ? `<span class="ja" lang="${escHtml((langTag || 'ja').toLowerCase())}">${escHtml(source)}</span>` : '') +
-      (english ? `<span class="en">${escHtml(english)}</span>` : '') +
-      noteHtml +
-      `</div>`;
     transcript.push({ ts, speaker: speaker || '', source: source || '', english: english || '' });
+    const now = Date.now();
+    const canGroup = lastTurn
+      && lastTurn.speaker === (speaker || '')
+      && now - lastTurn.wallMs < GROUP_GAP_MS
+      && lastTurn.pairs < GROUP_MAX_PAIRS;
+
+    if (canGroup) {
+      const pair = document.createElement('div');
+      pair.className = 'turn-pair';
+      pair.innerHTML = pairHtml(source, english, langTag, notes);
+      lastTurn.bodyEl.appendChild(pair);
+      lastTurn.wallMs = now;
+      lastTurn.pairs += 1;
+    } else {
+      const div = document.createElement('div');
+      div.className = 'turn';
+      const color = railColor(speaker);
+      if (color) div.style.setProperty('--rail', color);
+      const lag = lagMs != null ? ` · ${(lagMs / 1000).toFixed(1)}s` : '';
+      const speakerHtml = speaker ? `<span class="turn-speaker">${escHtml(speaker)}</span>` : '';
+      div.innerHTML =
+        `<div class="turn-meta">${ts}${speakerHtml ? ' ' : ''}${speakerHtml}` +
+        `<span>${escHtml(langTag || '')}${lag}</span></div>` +
+        `<div class="turn-body"><div class="turn-pair">${pairHtml(source, english, langTag, notes)}</div></div>`;
+      output.appendChild(div);
+      lastTurn = { speaker: speaker || '', wallMs: now, pairs: 1,
+                   bodyEl: div.querySelector('.turn-body') };
+    }
   }
 
-  output.appendChild(div);
   if (pinned) {
     output.scrollTop = output.scrollHeight;
   } else {
@@ -182,6 +213,7 @@ copyBtn.addEventListener('click', async () => {
 clearBtn.addEventListener('click', () => {
   output.innerHTML = '';
   transcript = [];
+  resetTurnGrouping();
   jumpLatest.classList.add('hidden');
 });
 
@@ -288,6 +320,7 @@ async function openSession(id) {
   viewingHistory = true;
   output.innerHTML = '';
   transcript = [];
+  resetTurnGrouping();
   speakerIndex = {};
   const when = s.startedAt && s.startedAt.toDate ? s.startedAt.toDate().toLocaleString('en-GB') : '';
   const terms = (s.glossary || '').split('\n').filter(l => l.trim()).length;
@@ -314,6 +347,7 @@ viewingBack.addEventListener('click', () => {
   viewingStrip.classList.add('hidden');
   output.innerHTML = '';
   transcript = [];
+  resetTurnGrouping();
 });
 
 // ── Text mode ─────────────────────────────────────────────────────────────────

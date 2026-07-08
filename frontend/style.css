@@ -385,6 +385,13 @@ body.live .transcript { max-height: none; }
   padding-left: 12px;
   display: flex;
   flex-direction: column;
+  gap: 10px;
+}
+
+/* One JA/EN sentence pair; several pairs flow inside a grouped turn. */
+.turn-pair {
+  display: flex;
+  flex-direction: column;
   gap: 3px;
 }
 

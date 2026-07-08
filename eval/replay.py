@@ -246,11 +246,17 @@ def main() -> None:
     completed = len(done)
     stopped_reason = ""
 
+    # Sentence assembly — same behavior as server.py: mid-sentence chunks are
+    # buffered and joined; offline, the 6s "speaker went silent" flush becomes
+    # "the next chunk starts more than 6s after this one ends".
+    assembler = ChunkAssembler()
+
     for i, (offset, chunk) in enumerate(chunks):
         seq = i + 1
         if seq in done:
             continue
         wav_bytes = to_wav_bytes(chunk)
+        dur_s = len(chunk) / SR
         t0 = time.perf_counter()
         try:
             def process():
@@ -261,23 +267,31 @@ def main() -> None:
                 if not text.strip():
                     return None
 
+                assembled = assembler.add(text, dur_s)
+                if assembled is None:
+                    end_t = offset + dur_s
+                    next_off = chunks[i + 1][0] if i + 1 < len(chunks) else None
+                    if next_off is not None and next_off - end_t <= 6.0:
+                        return "buffered"
+                    assembled = assembler.flush()
+
                 speaker, sim = "", -1.0
                 emb = embedder.embed(wav_bytes)
                 if emb is not None:
                     _, speaker, sim = book.assign(emb)
 
-                turns.append((text, speaker))
+                turns.append((assembled, speaker))
                 start_idx = max(summary_upto, len(turns) - MAX_VERBATIM)
                 start_idx = min(start_idx, max(0, len(turns) - MAX_HISTORY))
                 window = turns[start_idx:]
                 english, repaired = _translate_with_context(
-                    text, [t for t, _ in window], client,
+                    assembled, [t for t, _ in window], client,
                     model=cfg["model"], lang_name="Japanese", context=cfg["context"],
                     glossary=glossary_prompt, speaker=speaker,
                     speakers=[sp for _, sp in window], participants=participants,
                     summary=summary, diarized=True,
                 )
-                return text, speaker, sim, english, repaired
+                return assembled, speaker, sim, english, repaired
 
             result = call_with_budget_guard(process)
         except RunStopped as stop:
@@ -287,7 +301,10 @@ def main() -> None:
         ms = int((time.perf_counter() - t0) * 1000)
         cache_read, cache_created = client.drain_usage()
 
-        if result is None:
+        if result == "buffered":
+            record = {"seq": seq, "ts": time.time(), "buffered": True,
+                      "offset_s": round(offset, 1), "dur_s": round(dur_s, 1)}
+        elif result is None:
             record = {"seq": seq, "ts": time.time(), "skipped": True,
                       "offset_s": round(offset, 1), "dur_s": round(len(chunk) / SR, 1)}
         else:
@@ -295,11 +312,12 @@ def main() -> None:
             record = {
                 "seq": seq, "ts": time.time(), "speaker": speaker, "sim": round(sim, 3),
                 "source": text, "english": english or "", "repaired": repaired, "ms": ms,
+                "merged": assembler.last_merged,
                 "cache_read": cache_read, "cache_created": cache_created,
                 "offset_s": round(offset, 1), "dur_s": round(len(chunk) / SR, 1),
             }
             print(f"#{seq}/{len(chunks)} [{offset:6.1f}s] {speaker or '-':10s} sim={sim:5.2f} "
-                  f"cache={cache_read} {ms}ms  {text[:30]!r} → {(english or '')[:30]!r}", flush=True)
+                  f"merged={assembler.last_merged} {ms}ms  {text[:30]!r} → {(english or '')[:30]!r}", flush=True)
 
         with open(os.path.join(run_dir, f"{seq:04d}.wav"), "wb") as f:
             f.write(wav_bytes)
