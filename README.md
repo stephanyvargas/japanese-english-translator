@@ -11,9 +11,13 @@ Quality-focused Japanese-to-English translation system with microphone input. Sp
 
 **Conversation mode** (default, the meeting surface): audio is captured continuously and
 segmented on natural pauses (voice-activity detection), so chunks break at clause
-boundaries instead of mid-word. Each chunk is transcribed by OpenAI `gpt-4o-transcribe`,
-tagged with a speaker (diarization), and translated by Claude with the recent history,
-a session glossary, and the meeting context. A cheap self-repair pass fixes a chunk only
+boundaries instead of mid-word. Each chunk is transcribed by OpenAI `gpt-4o-transcribe`;
+**sentence assembly** then buffers chunks that are visibly mid-sentence (trailing
+particle/conjunction, no terminal predicate) and joins them with what follows — a
+sentence spread across pauses is translated once, whole, instead of as fragments (a 6s
+silence flush finishes a line when the speaker stops). Each assembled turn is tagged
+with a speaker (diarization) and translated by Claude with the recent history, a
+session glossary, and the meeting context. A cheap self-repair pass fixes a chunk only
 when it actually drops meaning.
 
 **Single-shot mode** (`--once`, `--text`): a quality pipeline — linguistic analysis →

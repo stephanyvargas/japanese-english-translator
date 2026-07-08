@@ -68,6 +68,8 @@ Rules:
 ("Yeah.", "Right, right.", "So, um...", "Uh...")
 - If the chunk is an incomplete clause (cut off at a pause), translate what is there \
 and let the next chunk continue it — do not invent an ending
+- If the new chunk only continues a sentence from a previous line, translate only the \
+continuation — never restate content already covered by an earlier line
 - Reproduce numbers, dates, quantities, units, and proper nouns exactly as spoken
 - Convey the politeness/honorific register through natural English register, not literal honorifics
 - Keep names and untranslatable loanwords consistent with how they appeared earlier

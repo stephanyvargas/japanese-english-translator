@@ -11,9 +11,11 @@ numpy/scipy (already in `requirements.txt`). It needs no model file and no extra
 dependency, and clusters 2–4 speakers well on reasonably clean, one-mic audio
 because each pause-delimited chunk is essentially one speaker's turn.
 
-Tuning: `DIARIZE_THRESHOLD` (env, default `0.72`) — cosine similarity above which a
+Tuning: `DIARIZE_THRESHOLD` (env, default `0.82`) — cosine similarity above which a
 chunk joins an existing speaker. Raise it if distinct speakers get merged; lower it
-if one speaker splits into several.
+if one speaker splits into several. (Was 0.72; raised after a real-audio eval showed
+same-speaker re-match sims of 0.89–0.98 while 0.72 merged a genuine two-person
+conversation into one label. Per-chunk `sim=` values are in the server logs.)
 
 ## Optional upgrade — ONNX d-vector
 

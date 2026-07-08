@@ -38,7 +38,11 @@ _FMAX = 7600.0
 # Minimum voiced length worth embedding (shorter → unreliable signature).
 _MIN_SAMPLES = int(_SAMPLE_RATE * 0.4)
 
-DEFAULT_THRESHOLD = float(os.environ.get("DIARIZE_THRESHOLD", "0.72"))
+# 0.82: real-audio eval showed same-speaker re-match sims of 0.89–0.98 while a
+# genuinely different voice scored 0.66; 0.72 under-split a real two-person
+# session (everything labeled Speaker 1). Raise/lower via DIARIZE_THRESHOLD if
+# the per-chunk sim= logs show merging/splitting.
+DEFAULT_THRESHOLD = float(os.environ.get("DIARIZE_THRESHOLD", "0.82"))
 
 
 # ── signal helpers ───────────────────────────────────────────────────────────
