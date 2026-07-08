@@ -29,6 +29,45 @@ const clearBtn     = document.getElementById('clearBtn');
 const copyBtn      = document.getElementById('copyBtn');
 const jumpLatest   = document.getElementById('jumpLatest');
 
+const gate         = document.getElementById('gate');
+const gateStatus   = document.getElementById('gateStatus');
+const signInBtn    = document.getElementById('signInBtn');
+const signOutBtn   = document.getElementById('signOutBtn');
+const accountChip  = document.getElementById('accountChip');
+const accountName  = document.getElementById('accountName');
+const historyList  = document.getElementById('historyList');
+const viewingStrip = document.getElementById('viewingStrip');
+const viewingLabel = document.getElementById('viewingLabel');
+const viewingBack  = document.getElementById('viewingBack');
+
+// ── Auth (login required: the gate covers the app until signed in) ──────────
+
+let currentUser = null;
+
+document.body.classList.add('auth-pending');
+
+document.addEventListener('store-ready', () => {
+  window.store.onUser(user => {
+    currentUser = user;
+    document.body.classList.remove('auth-pending');
+    document.body.classList.toggle('signed-out', !user);
+    gate.classList.toggle('hidden', !!user);
+    accountChip.classList.toggle('hidden', !user);
+    if (user) accountName.textContent = (user.displayName || user.email || '').split(' ')[0];
+  });
+});
+
+signInBtn.addEventListener('click', async () => {
+  gateStatus.textContent = '';
+  try {
+    await window.store.signIn();
+  } catch (err) {
+    gateStatus.textContent = 'Sign-in did not complete — try again.';
+  }
+});
+
+signOutBtn.addEventListener('click', () => window.store.signOut());
+
 // ── Tab switching ─────────────────────────────────────────────────────────────
 
 tabs.forEach(tab => {
@@ -37,6 +76,7 @@ tabs.forEach(tab => {
     panels.forEach(p => p.classList.add('hidden'));
     tab.classList.add('active');
     document.getElementById(`panel-${tab.dataset.tab}`).classList.remove('hidden');
+    if (tab.dataset.tab === 'history') renderHistoryList();
   });
 });
 
@@ -68,10 +108,10 @@ function isPinned() {
   return output.scrollTop >= output.scrollHeight - output.clientHeight - 80;
 }
 
-function appendChunk({ source, english, langTag, speaker, notes, error, lagMs }) {
+function appendChunk({ source, english, langTag, speaker, notes, error, lagMs, ts }) {
   const pinned = isPinned();
   const div = document.createElement('div');
-  const ts = nowStamp();
+  ts = ts || nowStamp();
 
   if (error) {
     div.className = 'turn-error';
@@ -145,6 +185,137 @@ clearBtn.addEventListener('click', () => {
   jumpLatest.classList.add('hidden');
 });
 
+// ── Saved sessions & history ─────────────────────────────────────────────────
+
+let liveSessionId = '';   // current live meeting doc
+let textSessionId = '';   // lazy per-page-load doc for typed translations
+let viewingHistory = false;
+
+function saveTurn(sessionId, turn) {
+  if (window.store && sessionId && !viewingHistory) window.store.saveTurn(sessionId, turn);
+}
+
+async function renderHistoryList() {
+  if (!window.store || !currentUser) return;
+  historyList.innerHTML = '<p class="hint">Loading your meetings…</p>';
+  let sessions = [];
+  try {
+    sessions = await window.store.listSessions();
+  } catch (err) {
+    historyList.innerHTML = '<p class="hint">Could not load history — check your connection and reopen this tab.</p>';
+    return;
+  }
+  if (!sessions.length) {
+    historyList.innerHTML = '<p class="hint">No saved meetings yet — run one and it will appear here.</p>';
+    return;
+  }
+  historyList.innerHTML = '';
+  sessions.forEach(s => historyList.appendChild(historyRow(s)));
+}
+
+function sessionName(s) {
+  return s.title || s.context || s.langName || 'Meeting';
+}
+
+function historyRow(s) {
+  const when = s.startedAt && s.startedAt.toDate
+    ? s.startedAt.toDate().toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' })
+    : '—';
+  const row = document.createElement('div');
+  row.className = 'history-row';
+  row.innerHTML =
+    `<button class="history-open">` +
+    `<span class="history-when">${escHtml(when)}</span>` +
+    `<span class="history-desc"><strong>${escHtml(sessionName(s))}</strong>` +
+    `${s.preview ? ' — ' + escHtml(s.preview) : ''}</span>` +
+    `<span class="history-count">${(s.turns || []).length} turns</span>` +
+    `</button>` +
+    `<button class="history-action" data-act="rename" title="Rename">Rename</button>` +
+    `<button class="history-action history-action-danger" data-act="delete" title="Delete">Delete</button>`;
+
+  row.querySelector('.history-open').addEventListener('click', () => openSession(s.id));
+
+  row.querySelector('[data-act="rename"]').addEventListener('click', () => {
+    const desc = row.querySelector('.history-desc');
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'history-rename';
+    input.value = s.title || '';
+    input.placeholder = 'Meeting title, e.g. Sales meeting';
+    desc.replaceWith(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const finish = async (save) => {
+      if (done) return;
+      done = true;
+      if (save && input.value.trim() && input.value.trim() !== s.title) {
+        try {
+          await window.store.renameSession(s.id, input.value);
+          s.title = input.value.trim();
+        } catch (err) {
+          console.warn('rename failed:', err);
+        }
+      }
+      row.replaceWith(historyRow(s));
+    };
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') finish(true);
+      if (e.key === 'Escape') finish(false);
+    });
+    input.addEventListener('blur', () => finish(true));
+  });
+
+  row.querySelector('[data-act="delete"]').addEventListener('click', async () => {
+    if (!window.confirm(`Delete “${sessionName(s)}” and its transcript? This cannot be undone.`)) return;
+    try {
+      await window.store.deleteSession(s.id);
+      row.remove();
+      if (!historyList.children.length) {
+        historyList.innerHTML = '<p class="hint">No saved meetings yet — run one and it will appear here.</p>';
+      }
+    } catch (err) {
+      console.warn('delete failed:', err);
+    }
+  });
+
+  return row;
+}
+
+async function openSession(id) {
+  const s = await window.store.getSession(id);
+  if (!s) return;
+  viewingHistory = true;
+  output.innerHTML = '';
+  transcript = [];
+  speakerIndex = {};
+  const when = s.startedAt && s.startedAt.toDate ? s.startedAt.toDate().toLocaleString('en-GB') : '';
+  const terms = (s.glossary || '').split('\n').filter(l => l.trim()).length;
+  const meta = [
+    `${s.langName || 'Japanese'} → English`,
+    s.model || '',
+    s.context && s.title ? s.context : '',
+    terms ? `${terms} key terms` : '',
+    s.participants ? `participants: ${s.participants.split('\n').filter(Boolean).join(', ')}` : '',
+  ].filter(Boolean).join(' · ');
+  viewingLabel.innerHTML =
+    `<strong>${escHtml(sessionName(s))}</strong>${when ? ' · ' + escHtml(when) : ''}` +
+    `<span class="viewing-meta">${escHtml(meta)}</span>`;
+  viewingStrip.classList.remove('hidden');
+  (s.turns || []).forEach(t => {
+    appendChunk({ source: t.source, english: t.english, speaker: t.speaker,
+                  langTag: t.langTag || 'JA', ts: t.ts });
+  });
+  output.scrollTop = 0;
+}
+
+viewingBack.addEventListener('click', () => {
+  viewingHistory = false;
+  viewingStrip.classList.add('hidden');
+  output.innerHTML = '';
+  transcript = [];
+});
+
 // ── Text mode ─────────────────────────────────────────────────────────────────
 
 translateBtn.addEventListener('click', async () => {
@@ -155,9 +326,13 @@ translateBtn.addEventListener('click', async () => {
   textStatus.textContent = 'Translating…';
 
   try {
+    const idToken = window.store ? await window.store.idToken() : '';
     const res = await fetch(`${apiBase()}/translate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(idToken ? { 'Authorization': `Bearer ${idToken}` } : {}),
+      },
       body: JSON.stringify({
         text,
         model: modelSel.value,
@@ -181,6 +356,19 @@ translateBtn.addEventListener('click', async () => {
       english: data.english_text,
       langTag: sourceLang.value.toUpperCase(),
       notes: showNotes.checked ? data.translator_notes : [],
+    });
+    if (window.store && !textSessionId) {
+      textSessionId = await window.store.startSession({
+        langName: sourceLang.options[sourceLang.selectedIndex].text,
+        sourceLang: sourceLang.value,
+        model: modelSel.value, context: 'Typed text',
+        glossary: glossaryEl.value.trim(), participants: '', diarize: false,
+      });
+    }
+    saveTurn(textSessionId, {
+      seq: transcript.length, ts: nowStamp(), speaker: '',
+      source: data.source_text, english: data.english_text,
+      langTag: sourceLang.value.toUpperCase(), first: transcript.length === 1,
     });
     textStatus.textContent = '';
   } catch (err) {
@@ -270,6 +458,23 @@ async function startConversation() {
   vadBuf = new Uint8Array(analyser.fftSize);
   src.connect(analyser);
 
+  // Session doc + ID token before the socket opens (login is required).
+  // The full setup is saved with the meeting so history shows how it was run.
+  const idToken = window.store ? await window.store.idToken() : '';
+  if (window.store) {
+    liveSessionId = await window.store.startSession({
+      langName: sourceLang.options[sourceLang.selectedIndex].text,
+      sourceLang: sourceLang.value,
+      model: modelSel.value,
+      context: contextInput.value.trim(),
+      glossary: glossaryEl.value.trim(),
+      participants: participantsEl.value.trim(),
+      diarize: diarizeEl.checked,
+    });
+  }
+  viewingHistory = false;
+  viewingStrip.classList.add('hidden');
+
   const wsUrl = apiBase().replace(/^http/, 'ws') + '/ws/conversation';
   ws = new WebSocket(wsUrl);
 
@@ -282,6 +487,7 @@ async function startConversation() {
       glossary: glossaryEl.value.trim(),
       participants: participantsEl.value.trim(),
       diarize: diarizeEl.checked,
+      id_token: idToken,
     }));
   };
 
@@ -302,6 +508,11 @@ async function startConversation() {
         langTag: sourceLang.value.toUpperCase(),
         lagMs,
       });
+      saveTurn(liveSessionId, {
+        seq: transcript.length, ts: nowStamp(), speaker: msg.speaker || '',
+        source: msg.source, english: msg.english,
+        langTag: sourceLang.value.toUpperCase(), first: transcript.length === 1,
+      });
     }
     setStatus();
     trySend();
@@ -310,7 +521,12 @@ async function startConversation() {
   ws.onerror = () => {
     appendChunk({ error: 'Connection lost — press “Start meeting” to reconnect.' });
   };
-  ws.onclose = () => { if (active) stopConversation(); };
+  ws.onclose = (evt) => {
+    if (evt.code === 4401) {
+      appendChunk({ error: 'Session expired — sign in again to continue.' });
+    }
+    if (active) stopConversation();
+  };
 
   active = true;
   inFlight = false;
@@ -390,6 +606,10 @@ function recordCycle() {
 
 function stopConversation() {
   active = false;
+  if (window.store && liveSessionId) {
+    window.store.endSession(liveSessionId, transcript.length);
+    liveSessionId = '';
+  }
   if (activeStream) {
     activeStream.getTracks().forEach(t => t.stop());
     activeStream = null;

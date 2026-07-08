@@ -9,3 +9,5 @@ fastapi
 uvicorn[standard]
 websockets
 av
+google-auth
+requests

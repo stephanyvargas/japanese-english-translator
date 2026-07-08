@@ -94,6 +94,19 @@ The same engine is exposed as a browser app: a FastAPI backend (`server.py`) and
 static frontend (`frontend/`). The browser captures the mic and streams audio to the
 backend over a WebSocket; transcription and translation run server-side.
 
+### Accounts & saved conversations
+
+Sign-in with Google (Firebase Auth) is **required** in production. Every meeting and
+typed translation is saved to Firestore under the signed-in user
+(`users/{uid}/sessions/{id}`, turns as an array field), written directly from the
+browser; `firestore.rules` restricts each user to their own data. The **History** tab
+lists past sessions and reopens any transcript (Copy minutes works there too).
+
+The backend independently verifies the Firebase ID token (sent in the WebSocket
+config frame / `Authorization: Bearer` header) when `REQUIRE_AUTH=1` is set —
+unauthenticated calls get WS close `4401` / HTTP 401, so the public Cloud Run URL
+can't be used to burn API credits. Leave `REQUIRE_AUTH` unset for local dev.
+
 ```bash
 # Run the backend locally (serves the frontend at http://localhost:8000 too)
 uvicorn server:app --reload --port 8000
@@ -172,10 +185,10 @@ gcloud run deploy translator-backend \
   --timeout 3600 \
   --memory 1Gi \
   --set-secrets ANTHROPIC_API_KEY=anthropic-api-key:latest,OPENAI_API_KEY=openai-api-key:latest \
-  --set-env-vars "^|^ALLOWED_ORIGINS=https://japanese-translator-501010.web.app,https://japanese-translator-501010.firebaseapp.com"
+  --set-env-vars "^|^ALLOWED_ORIGINS=https://japanese-translator-501010.web.app,https://japanese-translator-501010.firebaseapp.com|REQUIRE_AUTH=1"
 
-# Frontend → Firebase Hosting
-firebase deploy --only hosting
+# Frontend + Firestore rules → Firebase
+firebase deploy --only hosting,firestore:rules
 
 # Tail backend logs (timestamped per-chunk timing)
 gcloud run services logs read translator-backend --region asia-northeast1 --limit 50

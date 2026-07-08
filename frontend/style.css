@@ -416,6 +416,149 @@ body.live .transcript { max-height: none; }
   padding: 7px 16px;
 }
 
+/* ── Auth gate & account ────────────────────────────────────────────────── */
+
+/* Until auth resolves, show neither the gate nor the app (no flash). */
+body.auth-pending .setup,
+body.auth-pending .transcript-section,
+body.auth-pending #gate { display: none; }
+
+/* Signed out: only the gate. */
+body.signed-out .setup,
+body.signed-out .transcript-section,
+body.signed-out .status-bar { display: none; }
+
+.gate {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 0;
+}
+
+.gate-card {
+  background: var(--paper2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 40px 44px;
+  max-width: 380px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.gate-card .mark { font-size: 2rem; }
+.gate-card h2 { font-size: 1.05rem; font-weight: 600; }
+.gate-card .btn { margin-top: 8px; }
+
+.account-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.82rem;
+  color: var(--nezumi);
+}
+
+/* ── History ────────────────────────────────────────────────────────────── */
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.history-row {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.history-open {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+  background: var(--washi);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: var(--sans);
+  font-size: 0.88rem;
+  color: var(--sumi);
+  padding: 10px 14px;
+  text-align: left;
+}
+
+.history-open:hover { border-color: var(--ai); }
+
+.history-action {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--nezumi);
+  cursor: pointer;
+  font-family: var(--sans);
+  font-size: 0.75rem;
+  padding: 0 10px;
+}
+
+.history-action:hover { color: var(--sumi); border-color: var(--nezumi); }
+.history-action-danger:hover { color: var(--shu); border-color: var(--shu); }
+
+.history-rename {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.88rem;
+  padding: 4px 8px;
+}
+
+.history-when {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--nezumi);
+  white-space: nowrap;
+}
+
+.history-desc {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-count {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--nezumi);
+  white-space: nowrap;
+}
+
+.viewing-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: var(--paper2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 8px 14px;
+  font-size: 0.85rem;
+  color: var(--nezumi);
+}
+
+.viewing-strip strong { color: var(--sumi); font-weight: 600; }
+
+.viewing-meta {
+  display: block;
+  font-size: 0.78rem;
+  margin-top: 2px;
+}
+
 /* ── Responsive ─────────────────────────────────────────────────────────── */
 
 @media (max-width: 640px) {
