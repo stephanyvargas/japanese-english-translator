@@ -15,8 +15,23 @@
     <header class="masthead">
       <span class="mark" lang="ja">通訳</span>
       <h1>Meeting Interpreter</h1>
+      <span id="accountChip" class="account-chip hidden">
+        <span id="accountName"></span>
+        <button id="signOutBtn" class="btn btn-small">Sign out</button>
+      </span>
       <span id="seal" class="seal" aria-hidden="true"></span>
     </header>
+
+    <!-- Sign-in gate (login required; body.signed-out shows only this) -->
+    <section id="gate" class="gate hidden">
+      <div class="gate-card">
+        <span class="mark" lang="ja">通訳</span>
+        <h2>Live meeting interpreter</h2>
+        <p class="hint">Japanese → English as you speak, saved to your account.</p>
+        <button id="signInBtn" class="btn btn-primary">Continue with Google</button>
+        <p id="gateStatus" class="status-detail"></p>
+      </div>
+    </section>
 
     <!-- Live status bar (visible only while a meeting is running) -->
     <div id="statusBar" class="status-bar" role="status">
@@ -32,6 +47,7 @@
       <div class="tabs" role="tablist">
         <button class="tab active" data-tab="conversation" role="tab">Live meeting</button>
         <button class="tab" data-tab="text" role="tab">Type text</button>
+        <button class="tab" data-tab="history" role="tab">History</button>
       </div>
 
       <div class="setup-card">
@@ -113,8 +129,21 @@
             <span id="textStatus" class="status-detail"></span>
           </div>
         </div>
+
+        <!-- History panel -->
+        <div class="panel hidden" id="panel-history">
+          <div id="historyList" class="history-list">
+            <p class="hint">Loading your meetings…</p>
+          </div>
+        </div>
       </div>
     </section>
+
+    <!-- Viewing-past-meeting strip -->
+    <div id="viewingStrip" class="viewing-strip hidden">
+      <span id="viewingLabel">Viewing past meeting</span>
+      <button id="viewingBack" class="btn btn-small">Back</button>
+    </div>
 
     <!-- Transcript -->
     <section class="transcript-section">
@@ -131,6 +160,7 @@
 
   </div>
 
+  <script type="module" src="firebase-init.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

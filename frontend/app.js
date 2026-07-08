@@ -29,6 +29,45 @@ const clearBtn     = document.getElementById('clearBtn');
 const copyBtn      = document.getElementById('copyBtn');
 const jumpLatest   = document.getElementById('jumpLatest');
 
+const gate         = document.getElementById('gate');
+const gateStatus   = document.getElementById('gateStatus');
+const signInBtn    = document.getElementById('signInBtn');
+const signOutBtn   = document.getElementById('signOutBtn');
+const accountChip  = document.getElementById('accountChip');
+const accountName  = document.getElementById('accountName');
+const historyList  = document.getElementById('historyList');
+const viewingStrip = document.getElementById('viewingStrip');
+const viewingLabel = document.getElementById('viewingLabel');
+const viewingBack  = document.getElementById('viewingBack');
+
+// ── Auth (login required: the gate covers the app until signed in) ──────────
+
+let currentUser = null;
+
+document.body.classList.add('auth-pending');
+
+document.addEventListener('store-ready', () => {
+  window.store.onUser(user => {
+    currentUser = user;
+    document.body.classList.remove('auth-pending');
+    document.body.classList.toggle('signed-out', !user);
+    gate.classList.toggle('hidden', !!user);
+    accountChip.classList.toggle('hidden', !user);
+    if (user) accountName.textContent = (user.displayName || user.email || '').split(' ')[0];
+  });
+});
+
+signInBtn.addEventListener('click', async () => {
+  gateStatus.textContent = '';
+  try {
+    await window.store.signIn();
+  } catch (err) {
+    gateStatus.textContent = 'Sign-in did not complete — try again.';
+  }
+});
+
+signOutBtn.addEventListener('click', () => window.store.signOut());
+
 // ── Tab switching ─────────────────────────────────────────────────────────────
 
 tabs.forEach(tab => {
@@ -37,6 +76,7 @@ tabs.forEach(tab => {
     panels.forEach(p => p.classList.add('hidden'));
     tab.classList.add('active');
     document.getElementById(`panel-${tab.dataset.tab}`).classList.remove('hidden');
+    if (tab.dataset.tab === 'history') renderHistoryList();
   });
 });
 
@@ -145,6 +185,72 @@ clearBtn.addEventListener('click', () => {
   jumpLatest.classList.add('hidden');
 });
 
+// ── Saved sessions & history ─────────────────────────────────────────────────
+
+let liveSessionId = '';   // current live meeting doc
+let textSessionId = '';   // lazy per-page-load doc for typed translations
+let viewingHistory = false;
+
+function saveTurn(sessionId, turn) {
+  if (window.store && sessionId && !viewingHistory) window.store.saveTurn(sessionId, turn);
+}
+
+async function renderHistoryList() {
+  if (!window.store || !currentUser) return;
+  historyList.innerHTML = '<p class="hint">Loading your meetings…</p>';
+  let sessions = [];
+  try {
+    sessions = await window.store.listSessions();
+  } catch (err) {
+    historyList.innerHTML = '<p class="hint">Could not load history — check your connection and reopen this tab.</p>';
+    return;
+  }
+  if (!sessions.length) {
+    historyList.innerHTML = '<p class="hint">No saved meetings yet — run one and it will appear here.</p>';
+    return;
+  }
+  historyList.innerHTML = '';
+  sessions.forEach(s => {
+    const when = s.startedAt && s.startedAt.toDate
+      ? s.startedAt.toDate().toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' })
+      : '—';
+    const row = document.createElement('button');
+    row.className = 'history-row';
+    row.innerHTML =
+      `<span class="history-when">${escHtml(when)}</span>` +
+      `<span class="history-desc">${escHtml(s.context || s.langName || 'Meeting')}` +
+      `${s.preview ? ' — ' + escHtml(s.preview) : ''}</span>` +
+      `<span class="history-count">${(s.turns || []).length} turns</span>`;
+    row.addEventListener('click', () => openSession(s.id));
+    historyList.appendChild(row);
+  });
+}
+
+async function openSession(id) {
+  const s = await window.store.getSession(id);
+  if (!s) return;
+  viewingHistory = true;
+  output.innerHTML = '';
+  transcript = [];
+  speakerIndex = {};
+  const when = s.startedAt && s.startedAt.toDate ? s.startedAt.toDate().toLocaleString('en-GB') : '';
+  viewingLabel.textContent = `Viewing past meeting${when ? ' · ' + when : ''}`;
+  viewingStrip.classList.remove('hidden');
+  (s.turns || []).forEach(t => {
+    appendChunk({ source: t.source, english: t.english, speaker: t.speaker, langTag: t.langTag || 'JA' });
+    // appendChunk stamps the current time; keep the stored timestamp for Copy minutes.
+    if (transcript.length) transcript[transcript.length - 1].ts = t.ts || transcript[transcript.length - 1].ts;
+  });
+  output.scrollTop = 0;
+}
+
+viewingBack.addEventListener('click', () => {
+  viewingHistory = false;
+  viewingStrip.classList.add('hidden');
+  output.innerHTML = '';
+  transcript = [];
+});
+
 // ── Text mode ─────────────────────────────────────────────────────────────────
 
 translateBtn.addEventListener('click', async () => {
@@ -155,9 +261,13 @@ translateBtn.addEventListener('click', async () => {
   textStatus.textContent = 'Translating…';
 
   try {
+    const idToken = window.store ? await window.store.idToken() : '';
     const res = await fetch(`${apiBase()}/translate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(idToken ? { 'Authorization': `Bearer ${idToken}` } : {}),
+      },
       body: JSON.stringify({
         text,
         model: modelSel.value,
@@ -181,6 +291,17 @@ translateBtn.addEventListener('click', async () => {
       english: data.english_text,
       langTag: sourceLang.value.toUpperCase(),
       notes: showNotes.checked ? data.translator_notes : [],
+    });
+    if (window.store && !textSessionId) {
+      textSessionId = await window.store.startSession({
+        langName: sourceLang.options[sourceLang.selectedIndex].text,
+        model: modelSel.value, context: 'Typed text', participants: '',
+      });
+    }
+    saveTurn(textSessionId, {
+      seq: transcript.length, ts: nowStamp(), speaker: '',
+      source: data.source_text, english: data.english_text,
+      langTag: sourceLang.value.toUpperCase(), first: transcript.length === 1,
     });
     textStatus.textContent = '';
   } catch (err) {
@@ -270,6 +391,19 @@ async function startConversation() {
   vadBuf = new Uint8Array(analyser.fftSize);
   src.connect(analyser);
 
+  // Session doc + ID token before the socket opens (login is required).
+  const idToken = window.store ? await window.store.idToken() : '';
+  if (window.store) {
+    liveSessionId = await window.store.startSession({
+      langName: sourceLang.options[sourceLang.selectedIndex].text,
+      model: modelSel.value,
+      context: contextInput.value.trim(),
+      participants: participantsEl.value.trim(),
+    });
+  }
+  viewingHistory = false;
+  viewingStrip.classList.add('hidden');
+
   const wsUrl = apiBase().replace(/^http/, 'ws') + '/ws/conversation';
   ws = new WebSocket(wsUrl);
 
@@ -282,6 +416,7 @@ async function startConversation() {
       glossary: glossaryEl.value.trim(),
       participants: participantsEl.value.trim(),
       diarize: diarizeEl.checked,
+      id_token: idToken,
     }));
   };
 
@@ -302,6 +437,11 @@ async function startConversation() {
         langTag: sourceLang.value.toUpperCase(),
         lagMs,
       });
+      saveTurn(liveSessionId, {
+        seq: transcript.length, ts: nowStamp(), speaker: msg.speaker || '',
+        source: msg.source, english: msg.english,
+        langTag: sourceLang.value.toUpperCase(), first: transcript.length === 1,
+      });
     }
     setStatus();
     trySend();
@@ -310,7 +450,12 @@ async function startConversation() {
   ws.onerror = () => {
     appendChunk({ error: 'Connection lost — press “Start meeting” to reconnect.' });
   };
-  ws.onclose = () => { if (active) stopConversation(); };
+  ws.onclose = (evt) => {
+    if (evt.code === 4401) {
+      appendChunk({ error: 'Session expired — sign in again to continue.' });
+    }
+    if (active) stopConversation();
+  };
 
   active = true;
   inFlight = false;
@@ -390,6 +535,10 @@ function recordCycle() {
 
 function stopConversation() {
   active = false;
+  if (window.store && liveSessionId) {
+    window.store.endSession(liveSessionId, transcript.length);
+    liveSessionId = '';
+  }
   if (activeStream) {
     activeStream.getTracks().forEach(t => t.stop());
     activeStream = null;

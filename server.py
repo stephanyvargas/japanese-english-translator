@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 import anthropic
 import av
 from dotenv import load_dotenv
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
@@ -91,6 +91,31 @@ STT_PROMPT_CHARS = 400
 # which doubles as eval-harness input collected from real meetings.
 SAVE_CHUNKS_DIR = os.environ.get("SAVE_CHUNKS_DIR", "").strip()
 
+# When REQUIRE_AUTH=1 (production), every WS connection and /translate request
+# must carry a valid Firebase ID token — protects the public Cloud Run URL from
+# anonymous use of the API keys. Off by default for local dev.
+REQUIRE_AUTH = os.environ.get("REQUIRE_AUTH", "") == "1"
+FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "japanese-translator-501010")
+
+
+def _verify_token(token: str) -> str | None:
+    """Return the Firebase uid for a valid ID token, else None.
+
+    Verified once per WS connection / REST request (not per chunk). Uses
+    google-auth's Firebase verifier — no firebase-admin dependency.
+    """
+    if not token:
+        return None
+    try:
+        import google.auth.transport.requests
+        from google.oauth2 import id_token as google_id_token
+        claims = google_id_token.verify_firebase_token(
+            token, google.auth.transport.requests.Request(), audience=FIREBASE_PROJECT_ID)
+        return claims.get("user_id") or claims.get("sub")
+    except Exception as exc:
+        log.info("token verification failed: %s", exc)
+        return None
+
 
 def _to_wav(audio_bytes: bytes) -> bytes:
     """Convert any browser audio (WebM/Ogg/MP4) to 16kHz mono s16 WAV via PyAV."""
@@ -131,7 +156,11 @@ async def health():
 
 
 @app.post("/translate")
-async def translate_text(req: TranslateRequest):
+async def translate_text(req: TranslateRequest, authorization: str = Header(default="")):
+    if REQUIRE_AUTH:
+        token = authorization.removeprefix("Bearer ").strip()
+        if not _verify_token(token):
+            raise HTTPException(status_code=401, detail="Sign in to translate.")
     model = MODEL_ALIASES.get(req.model.lower(), req.model)
     lang_name = LANGUAGE_NAMES.get(req.source_lang.lower(), req.source_lang.upper())
     glossary = Glossary.parse(req.glossary).format_for_prompt()
@@ -170,6 +199,15 @@ async def ws_conversation(ws: WebSocket):
     except Exception:
         await ws.close(code=1008)
         return
+
+    uid = None
+    if REQUIRE_AUTH:
+        loop_ = asyncio.get_event_loop()
+        uid = await loop_.run_in_executor(
+            _executor, _verify_token, cfg.get("id_token", ""))
+        if not uid:
+            await ws.close(code=4401)
+            return
 
     model = MODEL_ALIASES.get(cfg.get("model", "sonnet").lower(), cfg.get("model", "sonnet"))
     source_lang = cfg.get("source_lang", "ja")
@@ -230,8 +268,8 @@ async def ws_conversation(ws: WebSocket):
         except Exception as exc:
             log.info("#%d chunk save failed (%s)", n, exc)
 
-    log.info("WS connected | model=%s stt=%s lang=%s context=%r terms=%d diarize=%s participants=%d",
-             model, stt_model, source_lang, context, len(glossary), diarize, len(names))
+    log.info("WS connected | uid=%s model=%s stt=%s lang=%s context=%r terms=%d diarize=%s participants=%d",
+             uid or "-", model, stt_model, source_lang, context, len(glossary), diarize, len(names))
 
     try:
         while True:
