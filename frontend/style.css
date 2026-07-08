@@ -337,6 +337,80 @@ textarea { resize: vertical; }
 }
 .btn-small:hover { color: var(--sumi); border-color: var(--nezumi); }
 
+/* ── Workspace: transcript + (interview) hint cards ─────────────────────── */
+
+.workspace {
+  flex: 1;
+  display: flex;
+  gap: 20px;
+  min-height: 200px;
+}
+
+.hints-panel {
+  flex: 0 0 320px;
+  display: flex;
+  flex-direction: column;
+}
+
+.hints-list {
+  flex: 1;
+  overflow-y: auto;
+  padding-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.hints-list:empty::before {
+  content: 'Answer hints appear here when the interviewer asks something.';
+  color: var(--nezumi);
+  font-style: italic;
+  font-size: 0.85rem;
+}
+
+.hint-card {
+  background: var(--paper2);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--ai);
+  border-radius: 4px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.hint-q {
+  font-weight: 600;
+  font-size: 0.92rem;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.hint-ts { font-family: var(--mono); font-size: 0.72rem; font-weight: 400; color: var(--nezumi); }
+
+.hint-bullet {
+  font-size: 0.98rem;   /* glanceable while speaking */
+  line-height: 1.4;
+  padding-left: 14px;
+  text-indent: -14px;
+}
+
+.hint-bullet::before { content: '– '; color: var(--ai); }
+
+.hint-angle {
+  color: var(--nezumi);
+  font-size: 0.8rem;
+  font-style: italic;
+  border-top: 1px solid var(--line);
+  padding-top: 6px;
+}
+
+@media (max-width: 780px) {
+  .workspace { flex-direction: column; }
+  .hints-panel { flex: none; max-height: 40vh; }
+}
+
 /* ── Transcript ─────────────────────────────────────────────────────────── */
 
 .transcript-section {
@@ -345,6 +419,7 @@ textarea { resize: vertical; }
   flex-direction: column;
   min-height: 200px;
   position: relative;
+  min-width: 0;
 }
 
 .transcript-header {

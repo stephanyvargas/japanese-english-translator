@@ -29,6 +29,15 @@ const clearBtn     = document.getElementById('clearBtn');
 const copyBtn      = document.getElementById('copyBtn');
 const jumpLatest   = document.getElementById('jumpLatest');
 
+const profileText  = document.getElementById('profileText');
+const profileStatus = document.getElementById('profileStatus');
+const saveProfileBtn = document.getElementById('saveProfileBtn');
+const captureTabEl = document.getElementById('captureTab');
+const startInterviewBtn = document.getElementById('startInterviewBtn');
+const prepInterviewStatus = document.getElementById('prepInterviewStatus');
+const hintsPanel   = document.getElementById('hintsPanel');
+const hintsList    = document.getElementById('hintsList');
+
 const gate         = document.getElementById('gate');
 const gateStatus   = document.getElementById('gateStatus');
 const signInBtn    = document.getElementById('signInBtn');
@@ -77,8 +86,46 @@ tabs.forEach(tab => {
     tab.classList.add('active');
     document.getElementById(`panel-${tab.dataset.tab}`).classList.remove('hidden');
     if (tab.dataset.tab === 'history') renderHistoryList();
+    if (tab.dataset.tab === 'interview') loadProfile();
   });
 });
+
+// ── Interview mode: profile + hints ──────────────────────────────────────────
+
+let currentMode = 'interpret';   // 'interpret' | 'interview' — set at Start
+let profileLoaded = false;
+
+async function loadProfile() {
+  if (profileLoaded || !window.store || !currentUser) return;
+  try {
+    const p = await window.store.getProfile();
+    profileText.value = p.text || '';
+    profileLoaded = true;
+  } catch (err) {
+    profileStatus.textContent = 'Could not load profile — check your connection.';
+  }
+}
+
+saveProfileBtn.addEventListener('click', async () => {
+  try {
+    await window.store.saveProfile(profileText.value);
+    profileStatus.textContent = 'Saved';
+  } catch (err) {
+    profileStatus.textContent = 'Save failed — try again.';
+  }
+  setTimeout(() => { profileStatus.textContent = ''; }, 1500);
+});
+
+function renderHint(hint, ts) {
+  if (!hint || !hint.is_question) return;
+  const card = document.createElement('div');
+  card.className = 'hint-card';
+  card.innerHTML =
+    `<div class="hint-q">${escHtml(hint.gist || 'Question')}<span class="hint-ts">${escHtml(ts || '')}</span></div>` +
+    (hint.bullets || []).map(b => `<div class="hint-bullet">${escHtml(b)}</div>`).join('') +
+    (hint.angle ? `<div class="hint-angle">${escHtml(hint.angle)}</div>` : '');
+  hintsList.prepend(card);  // newest on top — the one you need right now
+}
 
 // ── Meeting setup fold ────────────────────────────────────────────────────────
 // The setup form collapses to one line; the summary always shows what a meeting
@@ -241,6 +288,8 @@ clearBtn.addEventListener('click', () => {
   transcript = [];
   resetTurnGrouping();
   jumpLatest.classList.add('hidden');
+  hintsList.innerHTML = '';
+  if (!active) hintsPanel.classList.add('hidden');
 });
 
 // ── Saved sessions & history ─────────────────────────────────────────────────
@@ -361,10 +410,13 @@ async function openSession(id) {
     `<strong>${escHtml(sessionName(s))}</strong>${when ? ' · ' + escHtml(when) : ''}` +
     `<span class="viewing-meta">${escHtml(meta)}</span>`;
   viewingStrip.classList.remove('hidden');
+  hintsList.innerHTML = '';
   (s.turns || []).forEach(t => {
     appendChunk({ source: t.source, english: t.english, speaker: t.speaker,
                   langTag: t.langTag || 'JA', ts: t.ts });
+    if (t.hint) renderHint(t.hint, t.ts);
   });
+  hintsPanel.classList.toggle('hidden', !(s.turns || []).some(t => t.hint));
   output.scrollTop = 0;
 }
 
@@ -472,7 +524,8 @@ let dropped = 0;
 let meetingStart = 0;
 let elapsedTimer = null;
 
-startBtn.addEventListener('click', startConversation);
+startBtn.addEventListener('click', () => startConversation('interpret'));
+startInterviewBtn.addEventListener('click', () => startConversation('interview'));
 stopBtn.addEventListener('click', stopConversation);
 
 function setStatus() {
@@ -500,31 +553,64 @@ function trySend() {
   setStatus();
 }
 
-async function startConversation() {
-  prepStatus.textContent = '';
+let micStream = null;
+let displayStream = null;
+
+async function startConversation(mode) {
+  currentMode = mode || 'interpret';
+  const statusEl = currentMode === 'interview' ? prepInterviewStatus : prepStatus;
+  statusEl.textContent = '';
   try {
-    activeStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (err) {
-    prepStatus.textContent = 'Microphone access was denied — allow the mic and try again.';
+    statusEl.textContent = 'Microphone access was denied — allow the mic and try again.';
     return;
+  }
+
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+  // Interview mode: the interviewer usually comes through headphones, which the
+  // mic never hears — mix in the meeting tab's audio via screen-share capture.
+  activeStream = micStream;
+  if (currentMode === 'interview' && captureTabEl.checked) {
+    try {
+      displayStream = await navigator.mediaDevices.getDisplayMedia({
+        video: true, audio: true,
+      });
+      if (displayStream.getAudioTracks().length) {
+        const dest = audioCtx.createMediaStreamDestination();
+        audioCtx.createMediaStreamSource(micStream).connect(dest);
+        audioCtx.createMediaStreamSource(displayStream).connect(dest);
+        activeStream = dest.stream;
+      } else {
+        statusEl.textContent = 'That window has no audio — pick a tab and tick "share tab audio". Using mic only.';
+      }
+    } catch (err) {
+      statusEl.textContent = 'Tab capture declined — using mic only.';
+    }
   }
 
   // Loudness meter for pause detection. The analyser only reads the signal — it
   // is not connected to the destination, so there's no audio feedback.
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   const src = audioCtx.createMediaStreamSource(activeStream);
   analyser = audioCtx.createAnalyser();
   analyser.fftSize = 1024;
   vadBuf = new Uint8Array(analyser.fftSize);
   src.connect(analyser);
 
+  // Interview sessions run in English; interpret mode uses the picker.
+  const isInterview = currentMode === 'interview';
+  const langCode = isInterview ? 'en' : sourceLang.value;
+  const langName = isInterview ? 'English' : sourceLang.options[sourceLang.selectedIndex].text;
+
   // Session doc + ID token before the socket opens (login is required).
   // The full setup is saved with the meeting so history shows how it was run.
   const idToken = window.store ? await window.store.idToken() : '';
   if (window.store) {
     liveSessionId = await window.store.startSession({
-      langName: sourceLang.options[sourceLang.selectedIndex].text,
-      sourceLang: sourceLang.value,
+      mode: currentMode,
+      langName,
+      sourceLang: langCode,
       model: modelSel.value,
       context: contextInput.value.trim(),
       glossary: glossaryEl.value.trim(),
@@ -540,9 +626,11 @@ async function startConversation() {
 
   ws.onopen = () => {
     ws.send(JSON.stringify({
+      mode: currentMode,
+      profile: isInterview ? profileText.value.trim() : '',
       model: modelSel.value,
-      source_lang: sourceLang.value,
-      lang_name: sourceLang.options[sourceLang.selectedIndex].text,
+      source_lang: langCode,
+      lang_name: langName,
       context: contextInput.value.trim(),
       glossary: glossaryEl.value.trim(),
       participants: participantsEl.value.trim(),
@@ -565,13 +653,16 @@ async function startConversation() {
         source: msg.source,
         english: msg.english,
         speaker: msg.speaker,
-        langTag: sourceLang.value.toUpperCase(),
+        langTag: (msg.lang_tag || sourceLang.value).toUpperCase(),
         lagMs,
       });
+      if (msg.hint) renderHint(msg.hint, nowStamp());
       saveTurn(liveSessionId, {
         seq: transcript.length, ts: nowStamp(), speaker: msg.speaker || '',
         source: msg.source, english: msg.english,
-        langTag: sourceLang.value.toUpperCase(), first: transcript.length === 1,
+        langTag: (msg.lang_tag || sourceLang.value).toUpperCase(),
+        first: transcript.length === 1,
+        ...(msg.hint && msg.hint.is_question ? { hint: msg.hint } : {}),
       });
     }
     setStatus();
@@ -597,9 +688,18 @@ async function startConversation() {
   stopBtn.disabled = false;
 
   // Live view: setup collapses to the status bar, transcript becomes the hero.
-  const langName = sourceLang.options[sourceLang.selectedIndex].text;
   const modelName = modelSel.options[modelSel.selectedIndex].text.split(' ')[0];
-  liveMeta.textContent = `${langName} → English · ${modelName}`;
+  liveMeta.textContent = isInterview
+    ? `Interview copilot · English · ${modelName}`
+    : `${langName} → English · ${modelName}`;
+  if (isInterview) {
+    hintsList.innerHTML = '';
+    hintsPanel.classList.remove('hidden');
+    document.body.classList.add('interview');
+  } else {
+    hintsPanel.classList.add('hidden');
+    document.body.classList.remove('interview');
+  }
   document.body.classList.add('live');
   meetingStart = Date.now();
   tickElapsed();
@@ -670,10 +770,10 @@ function stopConversation() {
     window.store.endSession(liveSessionId, transcript.length);
     liveSessionId = '';
   }
-  if (activeStream) {
-    activeStream.getTracks().forEach(t => t.stop());
-    activeStream = null;
-  }
+  [activeStream, micStream, displayStream].forEach(s => {
+    if (s) s.getTracks().forEach(t => t.stop());
+  });
+  activeStream = micStream = displayStream = null;
   if (audioCtx) { audioCtx.close(); audioCtx = null; analyser = null; vadBuf = null; }
   if (ws) { ws.close(); ws = null; }
   if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }

@@ -46,6 +46,7 @@
     <section id="setup" class="setup">
       <div class="tabs" role="tablist">
         <button class="tab active" data-tab="conversation" role="tab">Live meeting</button>
+        <button class="tab" data-tab="interview" role="tab">Interview</button>
         <button class="tab" data-tab="text" role="tab">Type text</button>
         <button class="tab" data-tab="history" role="tab">History</button>
       </div>
@@ -133,6 +134,27 @@
           </div>
         </div>
 
+        <!-- Interview panel -->
+        <div class="panel hidden" id="panel-interview">
+          <details class="control-details" id="profileFold">
+            <summary>My profile <span id="profileSummary" class="hint">(CV, bio, projects — grounds the answer hints)</span></summary>
+            <textarea id="profileText" rows="10"
+              placeholder="Paste your CV, a short bio, and descriptions of your key projects.&#10;Hints will only ever reference what you put here."></textarea>
+            <div class="btn-row">
+              <button id="saveProfileBtn" class="btn btn-small">Save profile</button>
+              <span id="profileStatus" class="status-detail"></span>
+            </div>
+          </details>
+          <label class="checkbox-label">
+            <input type="checkbox" id="captureTab" checked />
+            Capture meeting-tab audio (pick the interview tab when prompted — needed when the interviewer is in your headphones)
+          </label>
+          <div class="btn-row">
+            <button id="startInterviewBtn" class="btn btn-primary">● Start interview</button>
+            <span id="prepInterviewStatus" class="status-detail"></span>
+          </div>
+        </div>
+
         <!-- History panel -->
         <div class="panel hidden" id="panel-history">
           <div id="historyList" class="history-list">
@@ -148,18 +170,25 @@
       <button id="viewingBack" class="btn btn-small">Back</button>
     </div>
 
-    <!-- Transcript -->
-    <section class="transcript-section">
-      <div class="transcript-header">
-        <span class="transcript-title">Transcript</span>
-        <span class="transcript-actions">
-          <button id="copyBtn" class="btn btn-small">Copy minutes</button>
-          <button id="clearBtn" class="btn btn-small">Clear</button>
-        </span>
-      </div>
-      <div id="output" class="transcript" tabindex="0"></div>
-      <button id="jumpLatest" class="jump-latest hidden">↓ Jump to latest</button>
-    </section>
+    <!-- Workspace: transcript + (interview mode) hint cards -->
+    <div class="workspace">
+      <section class="transcript-section">
+        <div class="transcript-header">
+          <span class="transcript-title">Transcript</span>
+          <span class="transcript-actions">
+            <button id="copyBtn" class="btn btn-small">Copy minutes</button>
+            <button id="clearBtn" class="btn btn-small">Clear</button>
+          </span>
+        </div>
+        <div id="output" class="transcript" tabindex="0"></div>
+        <button id="jumpLatest" class="jump-latest hidden">↓ Jump to latest</button>
+      </section>
+
+      <aside id="hintsPanel" class="hints-panel hidden" aria-label="Answer hints">
+        <div class="transcript-header"><span class="transcript-title">Answer hints</span></div>
+        <div id="hintsList" class="hints-list"></div>
+      </aside>
+    </div>
 
   </div>
 

@@ -9,7 +9,7 @@ import {
 } from 'https://www.gstatic.com/firebasejs/11.0.2/firebase-auth.js';
 import {
   addDoc, arrayUnion, collection, deleteDoc, doc, getDoc, getDocs, getFirestore,
-  limit, orderBy, query, serverTimestamp, updateDoc,
+  limit, orderBy, query, serverTimestamp, setDoc, updateDoc,
 } from 'https://www.gstatic.com/firebasejs/11.0.2/firebase-firestore.js';
 
 const app = initializeApp({
@@ -84,6 +84,18 @@ window.store = {
 
   async deleteSession(sessionId) {
     await deleteDoc(doc(sessionsCol(), sessionId));
+  },
+
+  // ── interview profile (CV, bio, projects — one doc per user) ─────────────
+
+  async getProfile() {
+    const snap = await getDoc(doc(db, 'users', auth.currentUser.uid, 'profile', 'main'));
+    return snap.exists() ? snap.data() : { text: '' };
+  },
+
+  async saveProfile(text) {
+    await setDoc(doc(db, 'users', auth.currentUser.uid, 'profile', 'main'),
+                 { text, updatedAt: serverTimestamp() });
   },
 
   // ── history retrieval ─────────────────────────────────────────────────────

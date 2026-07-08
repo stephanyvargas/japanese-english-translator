@@ -35,6 +35,7 @@ log = logging.getLogger("translator")
 from translator.assembler import ChunkAssembler  # noqa: E402
 from translator.diarizer import SpeakerBook, SpeakerEmbedder  # noqa: E402
 from translator.glossary import Glossary  # noqa: E402
+from translator.interview import generate_hints  # noqa: E402
 from translator.pipeline import _label, _summarize_history, _translate_with_context, run  # noqa: E402
 from translator.transcriber import DEFAULT_STT_MODEL, transcribe  # noqa: E402
 
@@ -62,6 +63,7 @@ _executor = ThreadPoolExecutor(max_workers=4)
 _summary_executor = ThreadPoolExecutor(max_workers=1)
 
 LANGUAGE_NAMES = {
+    "en": "English",
     "ja": "Japanese", "ko": "Korean", "zh": "Chinese",
     "es": "Spanish", "fr": "French", "de": "German",
     "pt": "Portuguese", "it": "Italian", "ru": "Russian", "ar": "Arabic",
@@ -220,6 +222,12 @@ async def ws_conversation(ws: WebSocket):
     glossary_stt = glossary.format_for_stt()
     glossary_prompt = glossary.format_for_prompt()
 
+    # Mode selects the per-turn processor: "interpret" (translate, default) or
+    # "interview" (profile-grounded answer hints). Shared: capture, STT,
+    # sentence assembly, diarization, history, session save.
+    mode = cfg.get("mode", "interpret")
+    profile = cfg.get("profile", "")
+
     participants = cfg.get("participants", "")
     diarize = bool(cfg.get("diarize", True))
     names = [n.strip() for n in participants.splitlines() if n.strip()]
@@ -298,20 +306,31 @@ async def ws_conversation(ws: WebSocket):
         start = max(summary_state["upto"], len(turns) - MAX_VERBATIM)
         start = min(start, max(0, len(turns) - MAX_HISTORY))
         window = turns[start:]
-        english, repaired = _translate_with_context(
-            text, [t for t, _ in window], anthropic_client,
-            model=model, lang_name=lang_name, context=context, glossary=glossary_prompt,
-            speaker=speaker, speakers=[sp for _, sp in window], participants=participants,
-            summary=summary_state["summary"], diarized=diarize,
-        )
+
+        english, repaired, hint = "", False, None
+        if mode == "interview":
+            # One pass, no repair — hint latency beats a second call.
+            hint = generate_hints(
+                text, [_label(t, sp) for t, sp in window[:-1]], profile,
+                anthropic_client, model=model, context=context, speaker=speaker,
+            )
+        else:
+            english, repaired = _translate_with_context(
+                text, [t for t, _ in window], anthropic_client,
+                model=model, lang_name=lang_name, context=context, glossary=glossary_prompt,
+                speaker=speaker, speakers=[sp for _, sp in window], participants=participants,
+                summary=summary_state["summary"], diarized=diarize,
+            )
         t3 = time.perf_counter()
 
         total_ms = int((t3 - t0) * 1000)
+        tail = (f"hint q={hint['is_question']} {hint['gist'][:30]!r}" if hint
+                else f"{(english or '')[:40]!r}")
         log.info(
-            "#%d stt %dms %r | merged=%d | %s sim=%.2f | mt %dms%s %r | total %dms",
+            "#%d stt %dms %r | merged=%d | %s sim=%.2f | mt %dms%s | %s | total %dms",
             n, stt_ms, text[:40], merged, speaker or "-", sim,
             (t3 - t0) * 1000 - stt_ms, " repaired" if repaired else "",
-            (english or "")[:40], total_ms,
+            tail, total_ms,
         )
         if session_dir:
             save_chunk(n, wav_bytes, {
@@ -319,7 +338,10 @@ async def ws_conversation(ws: WebSocket):
                 "sim": round(sim, 3), "source": text, "english": english or "",
                 "repaired": repaired, "ms": total_ms, "merged": merged,
             })
-        return {"source": text, "english": english or "", "speaker": speaker, "ms": total_ms}
+        result = {"source": text, "english": english or "", "speaker": speaker, "ms": total_ms}
+        if hint is not None:
+            result["hint"] = hint
+        return result
 
     def flush_pending(n: int) -> dict:
         """Speaker went silent mid-buffer — translate what's pending as-is."""
@@ -349,6 +371,7 @@ async def ws_conversation(ws: WebSocket):
                             "seq": seq,
                             "ts": time.time(),
                             "ms": result["ms"],
+                            **({"hint": result["hint"]} if "hint" in result else {}),
                         }))
                     continue
             else:
@@ -407,6 +430,7 @@ async def ws_conversation(ws: WebSocket):
                     "seq": n,
                     "ts": time.time(),
                     "ms": result["ms"],
+                    **({"hint": result["hint"]} if "hint" in result else {}),
                 }))
                 # Fold aging turns into the rolling summary — after the reply is
                 # sent, off the hot path, never overlapping itself.
