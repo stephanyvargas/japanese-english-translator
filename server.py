@@ -62,6 +62,11 @@ _executor = ThreadPoolExecutor(max_workers=4)
 # call can never occupy a hot-path worker and stall chunk processing.
 _summary_executor = ThreadPoolExecutor(max_workers=1)
 
+# Interview hints run off the reply path (transcript is sent immediately; the
+# hint follows as its own WS message) — own workers so a slow web search never
+# competes with transcription.
+_hint_executor = ThreadPoolExecutor(max_workers=2)
+
 LANGUAGE_NAMES = {
     "en": "English",
     "ja": "Japanese", "ko": "Korean", "zh": "Chinese",
@@ -307,13 +312,12 @@ async def ws_conversation(ws: WebSocket):
         start = min(start, max(0, len(turns) - MAX_HISTORY))
         window = turns[start:]
 
-        english, repaired, hint = "", False, None
+        english, repaired = "", False
         if mode == "interview":
-            # One pass, no repair — hint latency beats a second call.
-            hint = generate_hints(
-                text, [_label(t, sp) for t, sp in window[:-1]], profile,
-                anthropic_client, model=model, context=context, speaker=speaker,
-            )
+            # Hints are generated OFF the reply path (see deliver_hint below):
+            # the transcript goes out immediately and never blocks the next
+            # chunk on a slow hint (or web search). Just snapshot the context.
+            hint_ctx = [_label(t, sp) for t, sp in window[:-1]]
         else:
             english, repaired = _translate_with_context(
                 text, [t for t, _ in window], anthropic_client,
@@ -324,13 +328,11 @@ async def ws_conversation(ws: WebSocket):
         t3 = time.perf_counter()
 
         total_ms = int((t3 - t0) * 1000)
-        tail = (f"hint q={hint['is_question']} {hint['gist'][:30]!r}" if hint
-                else f"{(english or '')[:40]!r}")
         log.info(
-            "#%d stt %dms %r | merged=%d | %s sim=%.2f | mt %dms%s | %s | total %dms",
+            "#%d stt %dms %r | merged=%d | %s sim=%.2f | mt %dms%s %r | total %dms",
             n, stt_ms, text[:40], merged, speaker or "-", sim,
             (t3 - t0) * 1000 - stt_ms, " repaired" if repaired else "",
-            tail, total_ms,
+            (english or "")[:40], total_ms,
         )
         if session_dir:
             save_chunk(n, wav_bytes, {
@@ -339,8 +341,8 @@ async def ws_conversation(ws: WebSocket):
                 "repaired": repaired, "ms": total_ms, "merged": merged,
             })
         result = {"source": text, "english": english or "", "speaker": speaker, "ms": total_ms}
-        if hint is not None:
-            result["hint"] = hint
+        if mode == "interview":
+            result["hint_ctx"] = hint_ctx
         return result
 
     def flush_pending(n: int) -> dict:
@@ -350,6 +352,23 @@ async def ws_conversation(ws: WebSocket):
             return {"skipped": True}
         return translate_turn(n, text, pending_wav["wav"], time.perf_counter(),
                               0, assembler.last_merged)
+
+    async def deliver_hint(n: int, text: str, speaker: str, hint_ctx: list[str]) -> None:
+        """Generate interview hints in the background and push them when ready."""
+        t0 = time.perf_counter()
+        try:
+            hint = await loop.run_in_executor(
+                _hint_executor,
+                lambda: generate_hints(text, hint_ctx, profile, anthropic_client,
+                                       context=context, speaker=speaker))
+            log.info("#%d hint %dms | q=%s searched=%s %r",
+                     n, (time.perf_counter() - t0) * 1000,
+                     hint["is_question"], hint["searched"], hint["gist"][:30])
+            await ws.send_text(json.dumps({
+                "hint_only": True, "hint": hint, "seq": n, "ts": time.time(),
+            }))
+        except Exception as exc:
+            log.info("#%d hint delivery failed (%s)", n, exc)
 
     try:
         while True:
@@ -371,8 +390,11 @@ async def ws_conversation(ws: WebSocket):
                             "seq": seq,
                             "ts": time.time(),
                             "ms": result["ms"],
-                            **({"hint": result["hint"]} if "hint" in result else {}),
                         }))
+                        if "hint_ctx" in result:
+                            asyncio.create_task(deliver_hint(
+                                seq, result["source"], result.get("speaker", ""),
+                                result["hint_ctx"]))
                     continue
             else:
                 data = await ws.receive_bytes()
@@ -430,8 +452,11 @@ async def ws_conversation(ws: WebSocket):
                     "seq": n,
                     "ts": time.time(),
                     "ms": result["ms"],
-                    **({"hint": result["hint"]} if "hint" in result else {}),
                 }))
+                if "hint_ctx" in result:
+                    asyncio.create_task(deliver_hint(
+                        n, result["source"], result.get("speaker", ""),
+                        result["hint_ctx"]))
                 # Fold aging turns into the rolling summary — after the reply is
                 # sent, off the hot path, never overlapping itself.
                 if (len(turns) % SUMMARY_EVERY == 0

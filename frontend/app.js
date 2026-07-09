@@ -415,8 +415,10 @@ async function openSession(id) {
   viewingStrip.classList.remove('hidden');
   hintsList.innerHTML = '';
   (s.turns || []).forEach(t => {
-    appendChunk({ source: t.source, english: t.english, speaker: t.speaker,
-                  langTag: t.langTag || 'JA', ts: t.ts });
+    if (t.source || t.english) {
+      appendChunk({ source: t.source, english: t.english, speaker: t.speaker,
+                    langTag: t.langTag || 'JA', ts: t.ts });
+    }
     if (t.hint) renderHint(t.hint, t.ts);
   });
   hintsPanel.classList.toggle('hidden', !(s.turns || []).some(t => t.hint));
@@ -650,6 +652,20 @@ async function startConversation(mode) {
 
   ws.onmessage = (evt) => {
     const msg = JSON.parse(evt.data);
+
+    // Hints arrive asynchronously, decoupled from the chunk cycle — render and
+    // return without touching the in-flight backpressure state.
+    if (msg.hint_only) {
+      renderHint(msg.hint, nowStamp());
+      if (msg.hint && msg.hint.is_question) {
+        saveTurn(liveSessionId, {
+          seq: transcript.length, ts: nowStamp(), speaker: '',
+          source: '', english: '', hint: msg.hint,
+        });
+      }
+      return;
+    }
+
     // Every server reply (including skips) clears the in-flight slot so the
     // next pending chunk can go out.
     inFlight = false;
@@ -665,13 +681,11 @@ async function startConversation(mode) {
         langTag: (msg.lang_tag || sourceLang.value).toUpperCase(),
         lagMs,
       });
-      if (msg.hint) renderHint(msg.hint, nowStamp());
       saveTurn(liveSessionId, {
         seq: transcript.length, ts: nowStamp(), speaker: msg.speaker || '',
         source: msg.source, english: msg.english,
         langTag: (msg.lang_tag || sourceLang.value).toUpperCase(),
         first: transcript.length === 1,
-        ...(msg.hint && msg.hint.is_question ? { hint: msg.hint } : {}),
       });
     }
     setStatus();

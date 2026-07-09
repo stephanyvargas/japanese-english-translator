@@ -16,7 +16,14 @@ minimum, so every turn after the first reads the profile at ~0.1×.
 
 from __future__ import annotations
 
+import re
+
 import anthropic
+
+
+def _clean_bullet(text: str) -> str:
+    """Strip citation markup the model sometimes copies from search results."""
+    return re.sub(r"</?cite[^>]*>", "", text).strip()
 
 
 def _profile_system_blocks(profile: str, context: str = "") -> list[dict]:
@@ -31,10 +38,15 @@ You ALWAYS finish by calling the submit_hints tool — it is your only way to
 respond. Never reply with plain text.
 {context_line}
 Rules:
-- Set is_question_for_me=true ONLY when the turn asks the candidate something or \
-invites them to speak (questions, "tell me about...", "walk me through..."). \
-Small talk, the interviewer describing the company, or the candidate's own words \
-→ call submit_hints immediately with is_question_for_me=false and empty bullets.
+- Set is_question_for_me=true when the turn asks the candidate something or \
+invites them to speak. That includes: "tell me about...", "walk me through...", \
+"do you know / have you heard about X?", and "what do you know about our \
+company/us/X?" — anything ending in a question mark directed at the candidate \
+is a question for them. Only small talk, the interviewer describing something \
+without asking, or the candidate's own words get is_question_for_me=false \
+(with empty bullets).
+- If you ran a web search, the turn was a question — is_question_for_me must be \
+true and the bullets must use what you found.
 - Bullets are memory joggers, not scripts: 3–5 bullets, each ≤ 12 words, concrete.
 - Ground bullets about the CANDIDATE in facts from the profile below — a project \
 name, a real technology, a real situation. NEVER invent experience, employers, \
@@ -56,6 +68,10 @@ CANDIDATE PROFILE:
 
 
 _MAX_SEARCHES = 2  # bounds added latency per question
+
+# Haiku is the latency sweet spot for glanceable bullets; override via env
+# INTERVIEW_MODEL if hint quality ever needs the bump.
+DEFAULT_HINT_MODEL = "claude-haiku-4-5"
 
 _HINTS_TOOL = {
     "name": "submit_hints",
@@ -89,11 +105,16 @@ _HINTS_TOOL = {
     },
 }
 
-_WEB_SEARCH_TOOL = {
-    "type": "web_search_20260209",
-    "name": "web_search",
-    "max_uses": _MAX_SEARCHES,
-}
+def _web_search_tool(model: str) -> dict:
+    """The dynamic-filtering search variant needs Sonnet 4.6+/Opus 4.6+;
+    Haiku (and older models) use the basic variant."""
+    newer = any(m in model for m in ("sonnet-4-6", "sonnet-5", "opus-4-6",
+                                     "opus-4-7", "opus-4-8", "fable"))
+    return {
+        "type": "web_search_20260209" if newer else "web_search_20250305",
+        "name": "web_search",
+        "max_uses": _MAX_SEARCHES,
+    }
 
 _NO_HINT = {"is_question": False, "gist": "", "bullets": [], "angle": "", "searched": False}
 
@@ -103,7 +124,7 @@ def generate_hints(
     history: list[str],
     profile: str,
     client: anthropic.Anthropic,
-    model: str = "claude-sonnet-4-6",
+    model: str = DEFAULT_HINT_MODEL,
     context: str = "",
     speaker: str = "",
 ) -> dict:
@@ -126,9 +147,9 @@ def generate_hints(
     for _ in range(3):  # initial call + pause_turn resumes, bounded
         with client.messages.stream(
             model=model,
-            max_tokens=2048,
+            max_tokens=1024,
             system=_profile_system_blocks(profile, context),
-            tools=[_WEB_SEARCH_TOOL, _HINTS_TOOL],
+            tools=[_web_search_tool(model), _HINTS_TOOL],
             messages=messages,
         ) as stream:
             msg = stream.get_final_message()
@@ -143,7 +164,8 @@ def generate_hints(
             return {
                 "is_question": bool(inp.get("is_question_for_me")),
                 "gist": (inp.get("question_gist") or "").strip(),
-                "bullets": [b.strip() for b in inp.get("bullets", []) if b.strip()][:5],
+                "bullets": [_clean_bullet(b) for b in inp.get("bullets", [])
+                            if _clean_bullet(b)][:5],
                 "angle": (inp.get("angle") or "").strip(),
                 "searched": searched,
             }
