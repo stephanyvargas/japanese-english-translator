@@ -26,3 +26,12 @@ class FinalOutput(BaseModel):
     english_text: str
     translator_notes: list[str]
     analysis: AnalysisResult
+
+
+def thinking_kwargs(model: str) -> dict:
+    """Adaptive thinking where the model supports it, nothing where it doesn't.
+
+    Haiku 4.5 rejects `thinking: {"type": "adaptive"}` with a 400 — sending it
+    unconditionally used to kill live sessions when Haiku was selected.
+    """
+    return {} if "haiku" in model else {"thinking": {"type": "adaptive"}}

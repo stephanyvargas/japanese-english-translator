@@ -1,6 +1,6 @@
 import anthropic
 
-from .models import AnalysisResult, ReviewResult
+from .models import AnalysisResult, ReviewResult, thinking_kwargs
 from .prompts import REVIEWER_PROMPT
 
 _TOOL = {
@@ -57,7 +57,7 @@ def review(
     with client.messages.stream(
         model=model,
         max_tokens=2048,
-        thinking={"type": "adaptive"},
+        **thinking_kwargs(model),
         system=REVIEWER_PROMPT,
         tools=[_TOOL],
         tool_choice={"type": "tool", "name": "submit_review"},

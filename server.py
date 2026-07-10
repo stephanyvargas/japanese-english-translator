@@ -380,7 +380,12 @@ async def ws_conversation(ws: WebSocket):
                     data = await asyncio.wait_for(ws.receive_bytes(), timeout=6)
                 except asyncio.TimeoutError:
                     seq += 1
-                    result = await loop.run_in_executor(_executor, flush_pending, seq)
+                    try:
+                        result = await loop.run_in_executor(_executor, flush_pending, seq)
+                    except Exception as exc:
+                        log.exception("#%d flush failed: %s", seq, exc)
+                        await ws.send_text(json.dumps({"error": str(exc), "seq": seq}))
+                        continue
                     if not result.get("skipped"):
                         await ws.send_text(json.dumps({
                             "source": result["source"],
@@ -437,7 +442,15 @@ async def ws_conversation(ws: WebSocket):
                 return translate_turn(n, assembled, wav_bytes, t0, stt_ms,
                                       assembler.last_merged)
 
-            result = await loop.run_in_executor(_executor, process, data)
+            # A failing chunk (bad model config, transient API error) reports
+            # an error for THAT chunk and keeps the session alive — it must
+            # not tear down the whole meeting.
+            try:
+                result = await loop.run_in_executor(_executor, process, data)
+            except Exception as exc:
+                log.exception("#%d chunk failed: %s", n, exc)
+                await ws.send_text(json.dumps({"error": str(exc), "seq": n}))
+                continue
 
             if result.get("buffered"):
                 await ws.send_text(json.dumps({"buffered": True, "skipped": True, "seq": n}))

@@ -7,7 +7,7 @@ from openai import OpenAI
 
 from .analyzer import analyze
 from .audio import AudioCapture, record_from_mic, stream_chunks
-from .models import FinalOutput
+from .models import FinalOutput, thinking_kwargs
 from .reviewer import review
 from .transcriber import transcribe
 from .translator import translate
@@ -230,7 +230,7 @@ def _translate_with_context(
     with client.messages.stream(
         model=model,
         max_tokens=2048,
-        thinking={"type": "adaptive"},
+        **thinking_kwargs(model),
         system=_conversation_system_blocks(lang_name, context, glossary, participants, diarized),
         messages=[{"role": "user", "content": user_msg}],
     ) as stream:

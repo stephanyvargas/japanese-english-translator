@@ -8,7 +8,7 @@ extra reasoning call per translation.
 
 import anthropic
 
-from .models import DriftResult
+from .models import DriftResult, thinking_kwargs
 
 _TOOL = {
     "name": "submit_drift",
@@ -67,7 +67,7 @@ def check_drift(
     with client.messages.stream(
         model=model,
         max_tokens=1024,
-        thinking={"type": "adaptive"},
+        **thinking_kwargs(model),
         system=_SYSTEM,
         tools=[_TOOL],
         tool_choice={"type": "tool", "name": "submit_drift"},

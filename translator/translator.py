@@ -1,6 +1,6 @@
 import anthropic
 
-from .models import AnalysisResult
+from .models import AnalysisResult, thinking_kwargs
 from .prompts import get_translator_prompt
 
 
@@ -48,7 +48,7 @@ def translate(
     with client.messages.stream(
         model=model,
         max_tokens=4096,
-        thinking={"type": "adaptive"},
+        **thinking_kwargs(model),
         output_config={"effort": "high"},
         system=get_translator_prompt(lang_name),
         messages=[{"role": "user", "content": user_message}],
