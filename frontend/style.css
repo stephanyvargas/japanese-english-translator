@@ -149,11 +149,53 @@ body.live .status-bar { display: flex; }
   font-size: 0.78rem;
 }
 
-/* ── Setup (Prepare view) ───────────────────────────────────────────────── */
+/* ── Setup (Prepare views) ──────────────────────────────────────────────── */
 
 body.live .setup { display: none; }
+body.view-home .workspace { display: none; }  /* home shows only the cards */
 
 .setup { display: flex; flex-direction: column; gap: 0; }
+
+.view { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
+.view .setup-card { width: 100%; border-radius: 4px; }
+
+/* Home: mode cards */
+.mode-cards {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px;
+  padding-top: 8px;
+}
+
+.mode-card {
+  background: var(--paper2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: var(--sans);
+  color: var(--sumi);
+  text-align: left;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 130px;
+}
+
+.mode-card:hover:not(:disabled) { border-color: var(--ai); }
+.mode-card strong { font-size: 1.02rem; }
+.mode-kanji {
+  font-family: var(--display);
+  font-weight: 600;
+  color: var(--ai);
+  font-size: 1.15rem;
+  letter-spacing: 0.08em;
+}
+.mode-desc { color: var(--nezumi); font-size: 0.85rem; line-height: 1.45; }
+.mode-disabled { opacity: 0.45; cursor: default; }
+
+.back-home { align-self: flex-start; }
 
 .tabs { display: flex; gap: 2px; }
 
@@ -404,6 +446,18 @@ textarea { resize: vertical; }
   font-style: italic;
   border-top: 1px solid var(--line);
   padding-top: 6px;
+}
+
+/* Skeleton card shown the instant a question is detected, before bullets land. */
+.hint-thinking .hint-q { color: var(--nezumi); font-weight: 500; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .hint-thinking { animation: hint-pulse 1.2s ease-in-out infinite; }
+}
+
+@keyframes hint-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
 }
 
 @media (max-width: 780px) {

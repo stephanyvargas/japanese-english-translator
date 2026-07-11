@@ -29,16 +29,34 @@ _CONTINUATION_ENDINGS = (
     "は", "が", "を", "に", "で", "と", "も", "の", "から", "ので",
 )
 
+# English continuing-clause cues (used when the text is ASCII-dominant): a turn
+# ending in one of these words was cut mid-thought. Deliberately small — English
+# STT punctuates reliably, so terminal punctuation does most of the work.
+_EN_CONTINUATION_ENDINGS = (
+    "and", "but", "so", "or", "because", "with", "to", "of", "the", "a", "an",
+    "in", "on", "for", "about", "that", "your", "my", "our", ",",
+)
+
+
+def _is_ascii_dominant(text: str) -> bool:
+    return sum(ch.isascii() for ch in text) > len(text) * 0.7
+
 
 def looks_complete(text: str) -> bool:
     """True when the transcript chunk looks like a finished sentence."""
     t = text.strip()
     if not t:
         return True
-    if any(t.endswith(e) for e in _CONTINUATION_ENDINGS):
-        return False
     if t[-1] in _TERMINAL_PUNCT:
         return True
+    if _is_ascii_dominant(t):
+        # English: no terminal punctuation is only "incomplete" when the last
+        # word is an explicit continuation cue — otherwise treat it as done
+        # (STT emits punctuation reliably; over-buffering costs latency).
+        last = t.rstrip(",").split()[-1].lower() if t.split() else ""
+        return not (t.endswith(",") or last in _EN_CONTINUATION_ENDINGS)
+    if any(t.endswith(e) for e in _CONTINUATION_ENDINGS):
+        return False
     return any(t.endswith(e) for e in _TERMINAL_ENDINGS)
 
 
@@ -52,10 +70,12 @@ class ChunkAssembler:
 
     add() returns the text ready to translate, or None when the chunk was
     buffered. flush() force-emits whatever is pending (call it when the speaker
-    has gone silent).
+    has gone silent). Latency-sensitive modes (interview) use a smaller
+    ``max_parts`` so buffering can never hold a turn for long.
     """
 
-    def __init__(self):
+    def __init__(self, max_parts: int = _MAX_PARTS):
+        self.max_parts = max_parts
         self._parts: list[str] = []
         self._seconds = 0.0
         self.last_merged = 0  # how many chunks made up the last flushed text
@@ -74,7 +94,7 @@ class ChunkAssembler:
             return self.flush()
         self._parts.append(text)
         self._seconds += dur_s
-        capped = (len(self._parts) >= _MAX_PARTS
+        capped = (len(self._parts) >= self.max_parts
                   or self._seconds >= _MAX_SECONDS
                   or sum(len(p) for p in self._parts) >= _MAX_CHARS)
         if looks_complete(text) or capped:
@@ -84,8 +104,9 @@ class ChunkAssembler:
     def flush(self) -> str | None:
         if not self._parts:
             return None
-        # Japanese needs no space at joins; re.sub collapses any doubled 。
-        joined = re.sub(r"。+", "。", "".join(self._parts))
+        # Japanese joins with no separator; English needs a space between parts.
+        sep = " " if all(_is_ascii_dominant(p) for p in self._parts) else ""
+        joined = re.sub(r"。+", "。", sep.join(self._parts))
         self.last_merged = len(self._parts)
         self._parts = []
         self._seconds = 0.0

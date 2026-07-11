@@ -9,7 +9,7 @@
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+JP:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=Shippori+Mincho:wght@600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="style.css" />
 </head>
-<body>
+<body class="view-home">
   <div class="app">
 
     <header class="masthead">
@@ -42,16 +42,45 @@
       <button id="stopBtn" class="btn btn-end" disabled>End meeting</button>
     </div>
 
-    <!-- Prepare view -->
+    <!-- Prepare area: home (mode picker) + one dedicated view per mode -->
     <section id="setup" class="setup">
-      <div class="tabs" role="tablist">
-        <button class="tab active" data-tab="conversation" role="tab">Live meeting</button>
-        <button class="tab" data-tab="interview" role="tab">Interview</button>
-        <button class="tab" data-tab="text" role="tab">Type text</button>
-        <button class="tab" data-tab="history" role="tab">History</button>
+
+      <!-- Home: pick what you're doing -->
+      <div class="view" id="view-home">
+        <div class="mode-cards">
+          <button class="mode-card" data-view="interpret">
+            <span class="mode-kanji" lang="ja">通訳</span>
+            <strong>Live meeting</strong>
+            <span class="mode-desc">Japanese → English as people speak — speaker labels, saved minutes.</span>
+          </button>
+          <button class="mode-card" data-view="interview">
+            <span class="mode-kanji" lang="ja">面接</span>
+            <strong>Interview copilot</strong>
+            <span class="mode-desc">Glanceable answer hints grounded in your CV. English interviews.</span>
+          </button>
+          <button class="mode-card" data-view="text">
+            <span class="mode-kanji" lang="ja">翻訳</span>
+            <strong>Typed text</strong>
+            <span class="mode-desc">Paste text, get the full quality pipeline: analyze → translate → review.</span>
+          </button>
+          <button class="mode-card" data-view="history">
+            <span class="mode-kanji" lang="ja">記録</span>
+            <strong>History</strong>
+            <span class="mode-desc">Reopen, rename, or copy past meetings and interviews.</span>
+          </button>
+          <button class="mode-card mode-disabled" disabled>
+            <span class="mode-kanji" lang="ja">議事録</span>
+            <strong>Meeting notes</strong>
+            <span class="mode-desc">Summary, decisions, action points — coming soon.</span>
+          </button>
+        </div>
       </div>
 
-      <div class="setup-card">
+      <!-- Live meeting (interpreter) -->
+      <div class="view hidden" id="view-interpret">
+        <button class="back-home btn btn-small">← Home</button>
+        <div class="setup-card">
+        <div class="setup-slot"></div>
         <details id="setupFold" class="setup-fold">
           <summary>Meeting setup <span id="setupSummary" class="hint"></span></summary>
         <div class="control-row">
@@ -121,9 +150,15 @@
             <span id="prepStatus" class="status-detail"></span>
           </div>
         </div>
+        </div>
+      </div>
 
-        <!-- Text panel -->
-        <div class="panel hidden" id="panel-text">
+      <!-- Typed text -->
+      <div class="view hidden" id="view-text">
+        <button class="back-home btn btn-small">← Home</button>
+        <div class="setup-card">
+        <div class="setup-slot"></div>
+        <div class="panel" id="panel-text">
           <textarea id="textInput" rows="4" placeholder="Paste or type text to translate…"></textarea>
           <div class="btn-row">
             <button id="translateBtn" class="btn btn-primary">Translate</button>
@@ -133,9 +168,14 @@
             <span id="textStatus" class="status-detail"></span>
           </div>
         </div>
+        </div>
+      </div>
 
-        <!-- Interview panel (self-contained — does not use Meeting setup) -->
-        <div class="panel hidden" id="panel-interview">
+      <!-- Interview copilot (self-contained — no shared meeting setup) -->
+      <div class="view hidden" id="view-interview">
+        <button class="back-home btn btn-small">← Home</button>
+        <div class="setup-card">
+        <div class="panel" id="panel-interview">
           <div class="control-row">
             <label class="full-width">
               Role &amp; company <span class="hint">(steers the hints and any web lookups)</span>
@@ -161,16 +201,20 @@
             <input type="checkbox" id="captureTab" checked />
             Capture meeting-tab audio (pick the interview tab when prompted — needed when the interviewer is in your headphones)
           </label>
-          <p class="hint">Interviews run in English and use only the settings above plus your profile —
-            Meeting setup does not apply. Questions the profile can't answer trigger a quick web lookup.</p>
+          <p class="hint">Interviews run in English. The company is pre-researched when you press Start,
+            so most questions answer from your profile + that brief in a couple of seconds.</p>
           <div class="btn-row">
             <button id="startInterviewBtn" class="btn btn-primary">● Start interview</button>
             <span id="prepInterviewStatus" class="status-detail"></span>
           </div>
         </div>
+        </div>
+      </div>
 
-        <!-- History panel -->
-        <div class="panel hidden" id="panel-history">
+      <!-- History -->
+      <div class="view hidden" id="view-history">
+        <button class="back-home btn btn-small">← Home</button>
+        <div class="setup-card">
           <div id="historyList" class="history-list">
             <p class="hint">Loading your meetings…</p>
           </div>

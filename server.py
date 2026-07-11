@@ -35,7 +35,7 @@ log = logging.getLogger("translator")
 from translator.assembler import ChunkAssembler  # noqa: E402
 from translator.diarizer import SpeakerBook, SpeakerEmbedder  # noqa: E402
 from translator.glossary import Glossary  # noqa: E402
-from translator.interview import generate_hints  # noqa: E402
+from translator.interview import build_company_brief, generate_hints, looks_like_question  # noqa: E402
 from translator.pipeline import _label, _summarize_history, _translate_with_context, run  # noqa: E402
 from translator.transcriber import DEFAULT_STT_MODEL, transcribe  # noqa: E402
 
@@ -221,7 +221,8 @@ async def ws_conversation(ws: WebSocket):
     source_lang = cfg.get("source_lang", "ja")
     lang_name = LANGUAGE_NAMES.get(source_lang.lower(), source_lang.upper())
     context = cfg.get("context", "")
-    stt_model = cfg.get("stt_model", DEFAULT_STT_MODEL)
+    stt_model = cfg.get("stt_model") or (
+        "gpt-4o-mini-transcribe" if cfg.get("mode") == "interview" else DEFAULT_STT_MODEL)
 
     glossary = Glossary.parse(cfg.get("glossary", ""))
     glossary_stt = glossary.format_for_stt()
@@ -230,13 +231,26 @@ async def ws_conversation(ws: WebSocket):
     # Mode selects the per-turn processor: "interpret" (translate, default) or
     # "interview" (profile-grounded answer hints). Shared: capture, STT,
     # sentence assembly, diarization, history, session save.
+    # Interview is tuned for SPEED: faster STT model, tighter assembly caps,
+    # shorter silence flush — the translator path keeps its accuracy settings.
     mode = cfg.get("mode", "interpret")
     profile = cfg.get("profile", "")
+    is_interview = mode == "interview"
+    flush_timeout = 2 if is_interview else 6
 
     participants = cfg.get("participants", "")
     diarize = bool(cfg.get("diarize", True))
     names = [n.strip() for n in participants.splitlines() if n.strip()]
     speaker_book = SpeakerBook(names=names)
+
+    # Interview: pre-research the company while the user is still settling in,
+    # so company questions answer from a cached brief instead of a live search.
+    brief_state = {"brief": ""}
+    if is_interview and context.strip():
+        def _warm_brief():
+            brief_state["brief"] = build_company_brief(context, anthropic.Anthropic())
+            log.info("company brief ready (%d chars)", len(brief_state["brief"]))
+        _hint_executor.submit(_warm_brief)
 
     anthropic_client = anthropic.Anthropic()
     openai_client = OpenAI()
@@ -288,7 +302,7 @@ async def ws_conversation(ws: WebSocket):
     # Sentence assembly: mid-sentence chunks are buffered and joined with what
     # follows, so fragments aren't translated in isolation. pending_wav keeps
     # the newest buffered chunk's audio for diarization at flush time.
-    assembler = ChunkAssembler()
+    assembler = ChunkAssembler(max_parts=2 if is_interview else 4)
     pending_wav = {"wav": b""}
 
     def translate_turn(n: int, text: str, wav_bytes: bytes, t0: float,
@@ -354,21 +368,43 @@ async def ws_conversation(ws: WebSocket):
                               0, assembler.last_merged)
 
     async def deliver_hint(n: int, text: str, speaker: str, hint_ctx: list[str]) -> None:
-        """Generate interview hints in the background and push them when ready."""
+        """Generate interview hints in the background and push them when ready.
+
+        The client already shows a pending card (sent by the caller); partials
+        stream into it as the tool input generates, and the final hint_only
+        message is authoritative.
+        """
         t0 = time.perf_counter()
+
+        def on_partial(partial: dict) -> None:
+            # Called from the executor thread — hop back onto the event loop.
+            payload = json.dumps({"hint_partial": partial, "seq": n})
+            asyncio.run_coroutine_threadsafe(ws.send_text(payload), loop)
+
         try:
             hint = await loop.run_in_executor(
                 _hint_executor,
                 lambda: generate_hints(text, hint_ctx, profile, anthropic_client,
-                                       context=context, speaker=speaker))
+                                       context=context, speaker=speaker,
+                                       company_brief=brief_state["brief"],
+                                       on_partial=on_partial))
+            total_ms = int((time.perf_counter() - t0) * 1000)
+            hint["ms"] = total_ms
             log.info("#%d hint %dms | q=%s searched=%s %r",
-                     n, (time.perf_counter() - t0) * 1000,
-                     hint["is_question"], hint["searched"], hint["gist"][:30])
+                     n, total_ms, hint["is_question"], hint["searched"], hint["gist"][:30])
             await ws.send_text(json.dumps({
                 "hint_only": True, "hint": hint, "seq": n, "ts": time.time(),
             }))
         except Exception as exc:
             log.info("#%d hint delivery failed (%s)", n, exc)
+            try:
+                await ws.send_text(json.dumps({
+                    "hint_only": True, "seq": n, "ts": time.time(),
+                    "hint": {"is_question": False, "gist": "", "bullets": [],
+                             "angle": "", "searched": False},
+                }))
+            except Exception:
+                pass
 
     try:
         while True:
@@ -377,7 +413,7 @@ async def ws_conversation(ws: WebSocket):
             # speaker means the sentence won't be continued, so flush it.
             if assembler.pending:
                 try:
-                    data = await asyncio.wait_for(ws.receive_bytes(), timeout=6)
+                    data = await asyncio.wait_for(ws.receive_bytes(), timeout=flush_timeout)
                 except asyncio.TimeoutError:
                     seq += 1
                     try:
@@ -397,9 +433,13 @@ async def ws_conversation(ws: WebSocket):
                             "ms": result["ms"],
                         }))
                         if "hint_ctx" in result:
-                            asyncio.create_task(deliver_hint(
-                                seq, result["source"], result.get("speaker", ""),
-                                result["hint_ctx"]))
+                            if looks_like_question(result["source"]):
+                                await ws.send_text(json.dumps({"hint_pending": True, "seq": seq}))
+                                asyncio.create_task(deliver_hint(
+                                    seq, result["source"], result.get("speaker", ""),
+                                    result["hint_ctx"]))
+                            else:
+                                log.info("#%d hint gated out (not question-like)", seq)
                     continue
             else:
                 data = await ws.receive_bytes()
@@ -467,9 +507,13 @@ async def ws_conversation(ws: WebSocket):
                     "ms": result["ms"],
                 }))
                 if "hint_ctx" in result:
-                    asyncio.create_task(deliver_hint(
-                        n, result["source"], result.get("speaker", ""),
-                        result["hint_ctx"]))
+                    if looks_like_question(result["source"]):
+                        await ws.send_text(json.dumps({"hint_pending": True, "seq": n}))
+                        asyncio.create_task(deliver_hint(
+                            n, result["source"], result.get("speaker", ""),
+                            result["hint_ctx"]))
+                    else:
+                        log.info("#%d hint gated out (not question-like)", n)
                 # Fold aging turns into the rolling summary — after the reply is
                 # sent, off the hot path, never overlapping itself.
                 if (len(turns) % SUMMARY_EVERY == 0

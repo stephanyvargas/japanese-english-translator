@@ -9,8 +9,7 @@ const participantsEl = document.getElementById('participants');
 const diarizeEl    = document.getElementById('diarize');
 const backendUrl   = document.getElementById('backendUrl');
 
-const tabs         = document.querySelectorAll('.tab');
-const panels       = document.querySelectorAll('.panel');
+const views        = document.querySelectorAll('#setup .view');
 
 const startBtn     = document.getElementById('startBtn');
 const stopBtn      = document.getElementById('stopBtn');
@@ -79,18 +78,26 @@ signInBtn.addEventListener('click', async () => {
 
 signOutBtn.addEventListener('click', () => window.store.signOut());
 
-// ── Tab switching ─────────────────────────────────────────────────────────────
+// ── View router: home (mode cards) → dedicated per-mode screens ──────────────
 
-tabs.forEach(tab => {
-  tab.addEventListener('click', () => {
-    tabs.forEach(t => t.classList.remove('active'));
-    panels.forEach(p => p.classList.add('hidden'));
-    tab.classList.add('active');
-    document.getElementById(`panel-${tab.dataset.tab}`).classList.remove('hidden');
-    if (tab.dataset.tab === 'history') renderHistoryList();
-    if (tab.dataset.tab === 'interview') loadProfile();
-  });
-});
+function showView(name) {
+  views.forEach(v => v.classList.toggle('hidden', v.id !== `view-${name}`));
+  document.body.classList.toggle('view-home', name === 'home');
+  // The shared Meeting-setup fold serves both interpreter and typed-text —
+  // move the single element into whichever view is active.
+  if (name === 'interpret' || name === 'text') {
+    const slot = document.querySelector(`#view-${name} .setup-slot`);
+    const fold = document.getElementById('setupFold');
+    if (slot && fold && fold.parentElement !== slot) slot.appendChild(fold);
+  }
+  if (name === 'history') renderHistoryList();
+  if (name === 'interview') loadProfile();
+}
+
+document.querySelectorAll('.mode-card[data-view]').forEach(card =>
+  card.addEventListener('click', () => showView(card.dataset.view)));
+document.querySelectorAll('.back-home').forEach(btn =>
+  btn.addEventListener('click', () => showView('home')));
 
 // ── Interview mode: profile + hints ──────────────────────────────────────────
 
@@ -118,16 +125,49 @@ saveProfileBtn.addEventListener('click', async () => {
   setTimeout(() => { profileStatus.textContent = ''; }, 1500);
 });
 
-function renderHint(hint, ts) {
-  if (!hint || !hint.is_question) return;
-  const card = document.createElement('div');
-  card.className = 'hint-card';
-  const meta = [ts || '', hint.searched ? 'web' : ''].filter(Boolean).join(' · ');
-  card.innerHTML =
-    `<div class="hint-q">${escHtml(hint.gist || 'Question')}<span class="hint-ts">${escHtml(meta)}</span></div>` +
+// Hint cards fill in three stages: a pending skeleton the moment the server
+// gates a question in, streamed partial bullets as they generate, and the
+// authoritative final card. pendingCards maps seq → card element.
+let pendingCards = {};
+
+function hintCardHtml(hint, meta) {
+  return `<div class="hint-q">${escHtml(hint.gist || 'Question')}<span class="hint-ts">${escHtml(meta)}</span></div>` +
     (hint.bullets || []).map(b => `<div class="hint-bullet">${escHtml(b)}</div>`).join('') +
     (hint.angle ? `<div class="hint-angle">${escHtml(hint.angle)}</div>` : '');
+}
+
+function renderHintPending(seq) {
+  const card = document.createElement('div');
+  card.className = 'hint-card hint-thinking';
+  card.innerHTML = '<div class="hint-q">Thinking<span class="hint-dots">…</span></div>';
   hintsList.prepend(card);  // newest on top — the one you need right now
+  pendingCards[seq] = card;
+}
+
+function renderHintPartial(seq, partial) {
+  const card = pendingCards[seq];
+  if (!card) return;
+  card.innerHTML = hintCardHtml({ gist: partial.gist, bullets: partial.bullets }, '…');
+}
+
+function renderHint(hint, ts, seq) {
+  const card = seq != null ? pendingCards[seq] : null;
+  if (seq != null) delete pendingCards[seq];
+  if (!hint || !hint.is_question) {
+    if (card) card.remove();  // gate said maybe, model said no — clear skeleton
+    return;
+  }
+  const secs = hint.ms ? `${(hint.ms / 1000).toFixed(1)}s` : '';
+  const meta = [ts || '', hint.searched ? 'web' : '', secs].filter(Boolean).join(' · ');
+  if (card) {
+    card.classList.remove('hint-thinking');
+    card.innerHTML = hintCardHtml(hint, meta);
+  } else {
+    const el = document.createElement('div');
+    el.className = 'hint-card';
+    el.innerHTML = hintCardHtml(hint, meta);
+    hintsList.prepend(el);
+  }
 }
 
 // ── Meeting setup fold ────────────────────────────────────────────────────────
@@ -292,6 +332,7 @@ clearBtn.addEventListener('click', () => {
   resetTurnGrouping();
   jumpLatest.classList.add('hidden');
   hintsList.innerHTML = '';
+  pendingCards = {};
   if (!active) hintsPanel.classList.add('hidden');
 });
 
@@ -414,6 +455,7 @@ async function openSession(id) {
     `<span class="viewing-meta">${escHtml(meta)}</span>`;
   viewingStrip.classList.remove('hidden');
   hintsList.innerHTML = '';
+  pendingCards = {};
   (s.turns || []).forEach(t => {
     if (t.source || t.english) {
       appendChunk({ source: t.source, english: t.english, speaker: t.speaker,
@@ -504,6 +546,10 @@ let active = false;
 
 // Voice-activity segmentation: end a chunk on a natural pause instead of a blind
 // timer, so sentences aren't sliced mid-word (the main cause of misheard STT).
+// Interview preset trims the pause wait — a question's hint should start
+// generating ~0.5s after the interviewer stops, not 0.8s.
+let activeVad = null; // set per-session in startConversation
+
 const VAD = {
   POLL_MS: 100,        // how often we sample loudness
   RMS_THRESHOLD: 0.015, // above this = speech
@@ -563,6 +609,10 @@ let displayStream = null;
 
 async function startConversation(mode) {
   currentMode = mode || 'interpret';
+  // Interview trims the pause wait and the max turn length — speed over accuracy.
+  activeVad = currentMode === 'interview'
+    ? { ...VAD, SILENCE_MS: 500, MAX_MS: 10000 }
+    : { ...VAD };
   const statusEl = currentMode === 'interview' ? prepInterviewStatus : prepStatus;
   statusEl.textContent = '';
   try {
@@ -655,8 +705,16 @@ async function startConversation(mode) {
 
     // Hints arrive asynchronously, decoupled from the chunk cycle — render and
     // return without touching the in-flight backpressure state.
+    if (msg.hint_pending) {
+      renderHintPending(msg.seq);
+      return;
+    }
+    if (msg.hint_partial) {
+      renderHintPartial(msg.seq, msg.hint_partial);
+      return;
+    }
     if (msg.hint_only) {
-      renderHint(msg.hint, nowStamp());
+      renderHint(msg.hint, nowStamp(), msg.seq);
       if (msg.hint && msg.hint.is_question) {
         saveTurn(liveSessionId, {
           seq: transcript.length, ts: nowStamp(), speaker: '',
@@ -717,6 +775,7 @@ async function startConversation(mode) {
     : `${langName} → English · ${modelName}`;
   if (isInterview) {
     hintsList.innerHTML = '';
+  pendingCards = {};
     hintsPanel.classList.remove('hidden');
     document.body.classList.add('interview');
   } else {
@@ -772,17 +831,17 @@ function recordCycle() {
   // Cut the recording on a sustained pause after speech, or at the hard cap.
   const monitor = setInterval(() => {
     if (rec.state !== 'recording') return;
-    elapsed += VAD.POLL_MS;
-    if (currentRms() >= VAD.RMS_THRESHOLD) {
+    elapsed += activeVad.POLL_MS;
+    if (currentRms() >= activeVad.RMS_THRESHOLD) {
       sawSpeech = true;
-      speechMs += VAD.POLL_MS;
+      speechMs += activeVad.POLL_MS;
       silenceMs = 0;
     } else {
-      silenceMs += VAD.POLL_MS;
+      silenceMs += activeVad.POLL_MS;
     }
-    const pauseEnded = sawSpeech && speechMs >= VAD.MIN_SPEECH_MS && silenceMs >= VAD.SILENCE_MS;
-    if (pauseEnded || elapsed >= VAD.MAX_MS) rec.stop();
-  }, VAD.POLL_MS);
+    const pauseEnded = sawSpeech && speechMs >= activeVad.MIN_SPEECH_MS && silenceMs >= activeVad.SILENCE_MS;
+    if (pauseEnded || elapsed >= activeVad.MAX_MS) rec.stop();
+  }, activeVad.POLL_MS);
 
   rec.start();
 }
