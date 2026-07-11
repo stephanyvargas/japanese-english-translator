@@ -673,6 +673,68 @@ body.signed-out .status-bar { display: none; }
   padding: 4px 8px;
 }
 
+/* ── Interview profiles: picker, sections, chips ────────────────────────── */
+
+.profile-picker {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.profile-picker select { flex: 0 1 220px; width: auto; }
+
+.profile-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.profile-section-title {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--nezumi);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.profile-section .btn-row input[type="text"] { flex: 1; min-width: 160px; }
+.file-input { flex: 0 1 240px; font-size: 0.82rem; color: var(--nezumi); }
+
+.chip-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip-list:empty::before { content: 'None yet.'; color: var(--nezumi); font-size: 0.82rem; font-style: italic; }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--washi);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 0.82rem;
+  padding: 3px 6px 3px 12px;
+  max-width: 100%;
+}
+
+.chip-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 340px; }
+
+.chip-x {
+  background: none;
+  border: none;
+  color: var(--nezumi);
+  cursor: pointer;
+  font-size: 0.95rem;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 50%;
+}
+
+.chip-x:hover { color: var(--shu); }
+
 .history-when {
   font-family: var(--mono);
   font-size: 0.75rem;

@@ -32,7 +32,18 @@ const interviewRole  = document.getElementById('interviewRole');
 const interviewTerms = document.getElementById('interviewTerms');
 const profileText  = document.getElementById('profileText');
 const profileStatus = document.getElementById('profileStatus');
-const saveProfileBtn = document.getElementById('saveProfileBtn');
+const profileSelect = document.getElementById('profileSelect');
+const profileSummary = document.getElementById('profileSummary');
+const newProfileBtn = document.getElementById('newProfileBtn');
+const renameProfileBtn = document.getElementById('renameProfileBtn');
+const deleteProfileBtn = document.getElementById('deleteProfileBtn');
+const docChips     = document.getElementById('docChips');
+const docFile      = document.getElementById('docFile');
+const docNote      = document.getElementById('docNote');
+const addDocBtn    = document.getElementById('addDocBtn');
+const repoChips    = document.getElementById('repoChips');
+const repoInput    = document.getElementById('repoInput');
+const addRepoBtn   = document.getElementById('addRepoBtn');
 const captureTabEl = document.getElementById('captureTab');
 const startInterviewBtn = document.getElementById('startInterviewBtn');
 const prepInterviewStatus = document.getElementById('prepInterviewStatus');
@@ -99,31 +110,212 @@ document.querySelectorAll('.mode-card[data-view]').forEach(card =>
 document.querySelectorAll('.back-home').forEach(btn =>
   btn.addEventListener('click', () => showView('home')));
 
-// ── Interview mode: profile + hints ──────────────────────────────────────────
+// ── Interview mode: named profiles (bio + documents + repos) + hints ─────────
 
 let currentMode = 'interpret';   // 'interpret' | 'interview' — set at Start
-let profileLoaded = false;
+let profiles = [];
+let activeProfile = null;
+let profilesLoaded = false;
 
-async function loadProfile() {
-  if (profileLoaded || !window.store || !currentUser) return;
+function savedFlash(msg = 'Saved ✓ — loads automatically next time') {
+  profileStatus.textContent = msg;
+  setTimeout(() => { profileStatus.textContent = ''; }, 2500);
+}
+
+async function persistActiveProfile(flash = true) {
+  if (!activeProfile) return;
   try {
-    const p = await window.store.getProfile();
-    profileText.value = p.text || '';
-    profileLoaded = true;
+    await window.store.updateProfile(activeProfile.id, {
+      name: activeProfile.name, bio: activeProfile.bio,
+      documents: activeProfile.documents, repos: activeProfile.repos,
+    });
+    if (flash) savedFlash();
   } catch (err) {
-    profileStatus.textContent = 'Could not load profile — check your connection.';
+    profileStatus.textContent = 'Save failed — check your connection.';
   }
 }
 
-saveProfileBtn.addEventListener('click', async () => {
+async function loadProfile() {   // called when the Interview view opens
+  if (profilesLoaded || !window.store || !currentUser) return;
   try {
-    await window.store.saveProfile(profileText.value);
-    profileStatus.textContent = 'Saved';
+    profiles = await window.store.listProfiles();
+    const savedId = localStorage.getItem('profileId');
+    activeProfile = profiles.find(p => p.id === savedId) || profiles[0];
+    profilesLoaded = true;
+    renderProfileUI();
   } catch (err) {
-    profileStatus.textContent = 'Save failed — try again.';
+    profileStatus.textContent = 'Could not load profiles — check your connection.';
   }
-  setTimeout(() => { profileStatus.textContent = ''; }, 1500);
+}
+
+function renderProfileUI() {
+  profileSelect.innerHTML = '';
+  profiles.forEach(p => {
+    const opt = document.createElement('option');
+    opt.value = p.id;
+    opt.textContent = p.name;
+    profileSelect.appendChild(opt);
+  });
+  if (!activeProfile) return;
+  profileSelect.value = activeProfile.id;
+  localStorage.setItem('profileId', activeProfile.id);
+  profileText.value = activeProfile.bio || '';
+  renderChips();
+  updateProfileSummary();
+}
+
+function updateProfileSummary() {
+  if (!activeProfile) return;
+  const bits = [activeProfile.name];
+  if ((activeProfile.bio || '').trim()) bits.push('bio');
+  const d = (activeProfile.documents || []).length;
+  const r = (activeProfile.repos || []).length;
+  if (d) bits.push(`${d} doc${d > 1 ? 's' : ''}`);
+  if (r) bits.push(`${r} repo${r > 1 ? 's' : ''}`);
+  profileSummary.textContent = bits.join(' · ');
+}
+
+function chip(label, onRemove) {
+  const el = document.createElement('span');
+  el.className = 'chip';
+  el.innerHTML = `<span class="chip-label">${escHtml(label)}</span>`;
+  const x = document.createElement('button');
+  x.className = 'chip-x';
+  x.textContent = '×';
+  x.title = 'Remove';
+  x.addEventListener('click', onRemove);
+  el.appendChild(x);
+  return el;
+}
+
+function renderChips() {
+  docChips.innerHTML = '';
+  (activeProfile.documents || []).forEach((d, i) => {
+    docChips.appendChild(chip(d.note ? `${d.name} — ${d.note}` : d.name, async () => {
+      activeProfile.documents.splice(i, 1);
+      renderChips(); updateProfileSummary();
+      await persistActiveProfile();
+    }));
+  });
+  repoChips.innerHTML = '';
+  (activeProfile.repos || []).forEach((r, i) => {
+    repoChips.appendChild(chip(r.repo, async () => {
+      activeProfile.repos.splice(i, 1);
+      renderChips(); updateProfileSummary();
+      await persistActiveProfile();
+    }));
+  });
+}
+
+profileSelect.addEventListener('change', () => {
+  activeProfile = profiles.find(p => p.id === profileSelect.value) || activeProfile;
+  renderProfileUI();
 });
+
+newProfileBtn.addEventListener('click', async () => {
+  const name = window.prompt('Name for the new profile (e.g. "ML engineer"):');
+  if (!name || !name.trim()) return;
+  const p = await window.store.createProfile(name.trim());
+  profiles.unshift(p);
+  activeProfile = p;
+  renderProfileUI();
+  savedFlash('Profile created ✓');
+});
+
+renameProfileBtn.addEventListener('click', async () => {
+  if (!activeProfile) return;
+  const name = window.prompt('Rename profile:', activeProfile.name);
+  if (!name || !name.trim() || name.trim() === activeProfile.name) return;
+  activeProfile.name = name.trim();
+  renderProfileUI();
+  await persistActiveProfile();
+});
+
+deleteProfileBtn.addEventListener('click', async () => {
+  if (!activeProfile) return;
+  if (!window.confirm(`Delete profile “${activeProfile.name}”? This cannot be undone.`)) return;
+  await window.store.deleteProfile(activeProfile.id);
+  profiles = profiles.filter(p => p.id !== activeProfile.id);
+  if (!profiles.length) profiles = [await window.store.createProfile('Default')];
+  activeProfile = profiles[0];
+  renderProfileUI();
+});
+
+let bioTimer = null;
+profileText.addEventListener('input', () => {
+  if (!activeProfile) return;
+  activeProfile.bio = profileText.value;
+  updateProfileSummary();
+  clearTimeout(bioTimer);
+  bioTimer = setTimeout(() => persistActiveProfile(), 900);
+});
+
+addDocBtn.addEventListener('click', async () => {
+  const file = docFile.files && docFile.files[0];
+  if (!file || !activeProfile) { profileStatus.textContent = 'Choose a file first.'; return; }
+  addDocBtn.disabled = true;
+  profileStatus.textContent = 'Extracting…';
+  try {
+    const form = new FormData();
+    form.append('file', file);
+    form.append('note', docNote.value.trim());
+    const idToken = await window.store.idToken();
+    const res = await fetch(`${apiBase()}/profile/ingest`, {
+      method: 'POST', body: form,
+      headers: idToken ? { 'Authorization': `Bearer ${idToken}` } : {},
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || 'Extraction failed.');
+    const d = await res.json();
+    activeProfile.documents = activeProfile.documents || [];
+    activeProfile.documents.push({ name: d.name, note: d.note, text: d.text });
+    docFile.value = ''; docNote.value = '';
+    renderChips(); updateProfileSummary();
+    await persistActiveProfile();
+  } catch (err) {
+    profileStatus.textContent = err.message;
+  } finally {
+    addDocBtn.disabled = false;
+  }
+});
+
+addRepoBtn.addEventListener('click', async () => {
+  const repo = repoInput.value.trim();
+  if (!repo || !activeProfile) { profileStatus.textContent = 'Enter owner/repo first.'; return; }
+  addRepoBtn.disabled = true;
+  profileStatus.textContent = 'Summarizing repo…';
+  try {
+    const idToken = await window.store.idToken();
+    const res = await fetch(`${apiBase()}/profile/github`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json',
+                 ...(idToken ? { 'Authorization': `Bearer ${idToken}` } : {}) },
+      body: JSON.stringify({ repo }),
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || 'Repo lookup failed.');
+    const r = await res.json();
+    activeProfile.repos = activeProfile.repos || [];
+    activeProfile.repos.push({ repo: r.repo, summary: r.summary });
+    repoInput.value = '';
+    renderChips(); updateProfileSummary();
+    await persistActiveProfile();
+  } catch (err) {
+    profileStatus.textContent = err.message;
+  } finally {
+    addRepoBtn.disabled = false;
+  }
+});
+
+// The one string the hint engine receives — bio, then documents, then repos.
+function compileProfile() {
+  if (!activeProfile) return profileText.value.trim();
+  const parts = [];
+  if ((activeProfile.bio || '').trim()) parts.push(`BIO & NOTES:\n${activeProfile.bio.trim()}`);
+  (activeProfile.documents || []).forEach(d =>
+    parts.push(`DOCUMENT: ${d.name}${d.note ? ` — ${d.note}` : ''}\n${d.text}`));
+  (activeProfile.repos || []).forEach(r =>
+    parts.push(`PROJECT (github ${r.repo}):\n${r.summary}`));
+  return parts.join('\n\n').slice(0, 24000);
+}
 
 // Hint cards fill in three stages: a pending skeleton the moment the server
 // gates a question in, streamed partial bullets as they generate, and the
@@ -688,7 +880,7 @@ async function startConversation(mode) {
   ws.onopen = () => {
     ws.send(JSON.stringify({
       mode: currentMode,
-      profile: isInterview ? profileText.value.trim() : '',
+      profile: isInterview ? compileProfile() : '',
       model: sessionModel,
       source_lang: langCode,
       lang_name: langName,

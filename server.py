@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 import anthropic
 import av
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
@@ -36,6 +36,7 @@ from translator.assembler import ChunkAssembler  # noqa: E402
 from translator.diarizer import SpeakerBook, SpeakerEmbedder  # noqa: E402
 from translator.glossary import Glossary  # noqa: E402
 from translator.interview import build_company_brief, generate_hints, looks_like_question  # noqa: E402
+from translator.profile_ingest import extract_document, summarize_repo  # noqa: E402
 from translator.pipeline import _label, _summarize_history, _translate_with_context, run  # noqa: E402
 from translator.transcriber import DEFAULT_STT_MODEL, transcribe  # noqa: E402
 
@@ -192,6 +193,54 @@ async def translate_text(req: TranslateRequest, authorization: str = Header(defa
             "implicit_subjects": result.analysis.implicit_subjects,
         },
     }
+
+
+# ── Interview profile ingestion ──────────────────────────────────────────────
+# The client stores the results on the user's Firestore profile; these routes
+# only convert (document → text, repo → blurb). Same auth guard as /translate.
+
+def _require_auth(authorization: str) -> None:
+    if REQUIRE_AUTH:
+        token = authorization.removeprefix("Bearer ").strip()
+        if not _verify_token(token):
+            raise HTTPException(status_code=401, detail="Sign in first.")
+
+
+@app.post("/profile/ingest")
+async def profile_ingest(file: UploadFile = File(...), note: str = Form(""),
+                         authorization: str = Header(default="")):
+    _require_auth(authorization)
+    data = await file.read()
+    if len(data) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File too large (10 MB max).")
+    loop = asyncio.get_event_loop()
+    try:
+        text = await loop.run_in_executor(
+            _executor,
+            lambda: extract_document(file.filename or "document", data, anthropic.Anthropic()))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    log.info("profile ingest %r (%d bytes -> %d chars) note=%r",
+             file.filename, len(data), len(text), note[:40])
+    return {"name": file.filename, "note": note, "text": text}
+
+
+class RepoRequest(BaseModel):
+    repo: str
+
+
+@app.post("/profile/github")
+async def profile_github(req: RepoRequest, authorization: str = Header(default="")):
+    _require_auth(authorization)
+    loop = asyncio.get_event_loop()
+    try:
+        summary = await loop.run_in_executor(
+            _executor, lambda: summarize_repo(req.repo, anthropic.Anthropic()))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    repo = req.repo.strip().removeprefix("https://github.com/").strip("/")
+    log.info("profile github %r -> %d chars", repo, len(summary))
+    return {"repo": repo, "summary": summary}
 
 
 # ── WebSocket — conversation mode ────────────────────────────────────────────

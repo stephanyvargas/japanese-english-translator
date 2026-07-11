@@ -188,13 +188,40 @@
               <input type="text" id="interviewTerms" placeholder="e.g. Datadog, Kubernetes, Priya" />
             </label>
           </div>
-          <details class="control-details" id="profileFold">
-            <summary>My profile <span id="profileSummary" class="hint">(CV, bio, projects — grounds the answer hints)</span></summary>
-            <textarea id="profileText" rows="10"
-              placeholder="Paste your CV, a short bio, and descriptions of your key projects.&#10;Hints will only ever reference what you put here."></textarea>
-            <div class="btn-row">
-              <button id="saveProfileBtn" class="btn btn-small">Save profile</button>
+          <details class="control-details" id="profileFold" open>
+            <summary>My profile <span id="profileSummary" class="hint">(grounds the answer hints — saved to your account)</span></summary>
+
+            <div class="profile-picker">
+              <select id="profileSelect" aria-label="Profile"></select>
+              <button id="newProfileBtn" class="btn btn-small">New</button>
+              <button id="renameProfileBtn" class="btn btn-small">Rename</button>
+              <button id="deleteProfileBtn" class="btn btn-small">Delete</button>
               <span id="profileStatus" class="status-detail"></span>
+            </div>
+
+            <label class="full-width">
+              Bio &amp; notes
+              <textarea id="profileText" rows="6"
+                placeholder="A short bio, key experience, anything you want the hints to draw on."></textarea>
+            </label>
+
+            <div class="profile-section">
+              <span class="profile-section-title">Documents <span class="hint">(PDF / text / markdown — extracted into the profile)</span></span>
+              <div id="docChips" class="chip-list"></div>
+              <div class="btn-row">
+                <input type="file" id="docFile" accept=".pdf,.txt,.md,.markdown" class="file-input" />
+                <input type="text" id="docNote" placeholder="What is this? e.g. 2024 resume" />
+                <button id="addDocBtn" class="btn btn-small">Add document</button>
+              </div>
+            </div>
+
+            <div class="profile-section">
+              <span class="profile-section-title">GitHub projects <span class="hint">(public repos — summarized into the profile)</span></span>
+              <div id="repoChips" class="chip-list"></div>
+              <div class="btn-row">
+                <input type="text" id="repoInput" placeholder="owner/repo, e.g. stephanyvargas/japanese-english-translator" />
+                <button id="addRepoBtn" class="btn btn-small">Add repo</button>
+              </div>
             </div>
           </details>
           <label class="checkbox-label">

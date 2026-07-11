@@ -267,11 +267,16 @@ def generate_hints(
                       if b.type == "tool_use" and b.name == "submit_hints"), None)
         if block is not None:
             inp = block.input
+            raw = inp.get("bullets", [])
+            if isinstance(raw, str):
+                # The model occasionally emits the array as one string — split on
+                # newlines rather than iterating characters.
+                raw = [line.strip("-• \t") for line in raw.splitlines()]
             return {
                 "is_question": bool(inp.get("is_question_for_me")),
                 "gist": (inp.get("question_gist") or "").strip(),
-                "bullets": [_clean_bullet(b) for b in inp.get("bullets", [])
-                            if _clean_bullet(b)][:5],
+                "bullets": [_clean_bullet(b) for b in raw
+                            if isinstance(b, str) and _clean_bullet(b)][:5],
                 "angle": (inp.get("angle") or "").strip(),
                 "searched": searched,
             }

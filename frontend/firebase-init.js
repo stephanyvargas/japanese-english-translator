@@ -86,16 +86,36 @@ window.store = {
     await deleteDoc(doc(sessionsCol(), sessionId));
   },
 
-  // ── interview profile (CV, bio, projects — one doc per user) ─────────────
+  // ── interview profiles (named; each holds bio + documents + repos) ───────
 
-  async getProfile() {
-    const snap = await getDoc(doc(db, 'users', auth.currentUser.uid, 'profile', 'main'));
-    return snap.exists() ? snap.data() : { text: '' };
+  async listProfiles() {
+    const col = collection(db, 'users', auth.currentUser.uid, 'profiles');
+    const snap = await getDocs(query(col, orderBy('updatedAt', 'desc'), limit(20)));
+    let profiles = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    if (!profiles.length) {
+      // Migrate the legacy single-profile doc, or start fresh.
+      const legacy = await getDoc(doc(db, 'users', auth.currentUser.uid, 'profile', 'main'));
+      const bio = legacy.exists() ? (legacy.data().text || '') : '';
+      const created = await this.createProfile('Default', bio);
+      profiles = [created];
+    }
+    return profiles;
   },
 
-  async saveProfile(text) {
-    await setDoc(doc(db, 'users', auth.currentUser.uid, 'profile', 'main'),
-                 { text, updatedAt: serverTimestamp() });
+  async createProfile(name, bio = '') {
+    const col = collection(db, 'users', auth.currentUser.uid, 'profiles');
+    const data = { name, bio, documents: [], repos: [], updatedAt: serverTimestamp() };
+    const ref = await addDoc(col, data);
+    return { id: ref.id, ...data };
+  },
+
+  async updateProfile(id, fields) {
+    await updateDoc(doc(db, 'users', auth.currentUser.uid, 'profiles', id),
+                    { ...fields, updatedAt: serverTimestamp() });
+  },
+
+  async deleteProfile(id) {
+    await deleteDoc(doc(db, 'users', auth.currentUser.uid, 'profiles', id));
   },
 
   // ── history retrieval ─────────────────────────────────────────────────────
