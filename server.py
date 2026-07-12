@@ -8,16 +8,19 @@ Exposes two surfaces:
 
 import asyncio
 import io
+import secrets
 import json
+import threading
 import logging
 import os
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
 import anthropic
 import av
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, Header, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
@@ -243,342 +246,419 @@ async def profile_github(req: RepoRequest, authorization: str = Header(default="
     return {"repo": repo, "summary": summary}
 
 
-# ── WebSocket — conversation mode ────────────────────────────────────────────
+# ── Live sessions: server-owned state, typed events, resumability (P1) ──────
+#
+# A LiveSession owns everything that used to live in the WebSocket closure —
+# transcript, assembler, diarization, summary, company brief — plus an event
+# ring buffer. The WS is a dumb pipe: clients create a session over REST, then
+# connect (and reconnect) with ?session_id=…&last_seq=N; missed events replay
+# from the ring. Every server→client frame is a versioned envelope:
+#   {v, sid, seq, ts, type, data}
+# Event types: transcript.final · translation.final · hint.pending|partial|final
+# · chunk.ack (transitional, dies with the batch-capture path in P2) ·
+# session.status · error.
+
+SESSION_RING = 500          # replayable events kept per session
+SESSION_GRACE_S = 120       # how long a disconnected session survives
+
+
+class LiveSession:
+    def __init__(self, cfg: dict, uid: str | None, loop: asyncio.AbstractEventLoop):
+        self.id = "sess_" + secrets.token_hex(8)
+        self.uid = uid
+        self.loop = loop
+
+        self.mode = cfg.get("mode", "interpret")
+        self.is_interview = self.mode == "interview"
+        self.model = MODEL_ALIASES.get(cfg.get("model", "sonnet").lower(),
+                                       cfg.get("model", "sonnet"))
+        self.source_lang = cfg.get("source_lang", "ja")
+        self.lang_name = LANGUAGE_NAMES.get(self.source_lang.lower(),
+                                            self.source_lang.upper())
+        self.stt_model = cfg.get("stt_model") or (
+            "gpt-4o-mini-transcribe" if self.is_interview else DEFAULT_STT_MODEL)
+        self.context = cfg.get("context", "")
+        self.profile = cfg.get("profile", "")
+        self.participants = cfg.get("participants", "")
+        self.diarize = bool(cfg.get("diarize", True))
+        self.flush_timeout = 2 if self.is_interview else 6
+
+        g = Glossary.parse(cfg.get("glossary", ""))
+        self.glossary_stt = g.format_for_stt()
+        self.glossary_prompt = g.format_for_prompt()
+
+        names = [n.strip() for n in self.participants.splitlines() if n.strip()]
+        self.speaker_book = SpeakerBook(names=names)
+        self.assembler = ChunkAssembler(max_parts=2 if self.is_interview else 4)
+        self.pending_wav = b""
+        self.turns: list[tuple[str, str]] = []
+        self.summary_state = {"summary": "", "upto": 0, "busy": False}
+        self.brief_state = {"brief": ""}
+        self.chunk_n = 0
+
+        self.anthropic_client = anthropic.Anthropic()
+        self.openai_client = OpenAI()
+
+        self.seq = 0
+        self._lock = threading.Lock()
+        self.ring: deque = deque(maxlen=SESSION_RING)
+        self.ws: WebSocket | None = None
+        self.disconnected_at: float | None = time.time()
+        self.attached_before = False
+
+        self.session_dir = ""
+        if SAVE_CHUNKS_DIR:
+            self.session_dir = os.path.join(SAVE_CHUNKS_DIR, time.strftime("%Y%m%d-%H%M%S"))
+            os.makedirs(self.session_dir, exist_ok=True)
+
+    def _make_event(self, type_: str, data: dict) -> dict:
+        """Allocate a seq and append to the ring (thread-safe)."""
+        with self._lock:
+            self.seq += 1
+            evt = {"v": 1, "sid": self.id, "seq": self.seq, "ts": time.time(),
+                   "type": type_, "data": data}
+            self.ring.append(evt)
+        return evt
+
+    async def emit(self, type_: str, data: dict) -> None:
+        """Append to the ring and forward to the live socket (if any).
+
+        Events emitted while disconnected are not lost — they wait in the ring
+        for the next connection's last_seq replay.
+        """
+        evt = self._make_event(type_, data)
+        if self.ws is not None:
+            try:
+                await self.ws.send_text(json.dumps(evt))
+            except Exception:
+                self.ws = None
+                self.disconnected_at = time.time()
+
+    def emit_threadsafe(self, type_: str, data: dict) -> None:
+        """Emit from an executor thread. If no live event loop exists (client
+        between connections), the event still lands in the ring for replay —
+        results generated while disconnected must never be lost."""
+        try:
+            if self.loop is not None and not self.loop.is_closed():
+                asyncio.run_coroutine_threadsafe(self.emit(type_, data), self.loop)
+                return
+        except Exception:
+            pass
+        self._make_event(type_, data)
+
+
+_sessions: dict[str, LiveSession] = {}
+
+
+def _reap_sessions() -> None:
+    now = time.time()
+    for sid, s in list(_sessions.items()):
+        if s.ws is None and s.disconnected_at and now - s.disconnected_at > SESSION_GRACE_S:
+            del _sessions[sid]
+            log.info("session %s reaped after %ds idle", sid, SESSION_GRACE_S)
+
+
+@app.post("/session")
+async def create_session(cfg: dict, authorization: str = Header(default="")):
+    """Create a live session; returns the id the WebSocket connects with."""
+    uid = None
+    if REQUIRE_AUTH:
+        token = authorization.removeprefix("Bearer ").strip()
+        uid = _verify_token(token)
+        if not uid:
+            raise HTTPException(status_code=401, detail="Sign in first.")
+    _reap_sessions()
+    s = LiveSession(cfg, uid, asyncio.get_event_loop())
+    _sessions[s.id] = s
+
+    if s.is_interview and s.context.strip():
+        # Pre-research the company while the user is settling in.
+        s.emit_threadsafe("session.status", {"state": "warming_brief", "detail": s.context})
+        def _warm():
+            s.brief_state["brief"] = build_company_brief(s.context, anthropic.Anthropic())
+            log.info("session %s company brief ready (%d chars)", s.id, len(s.brief_state["brief"]))
+        _hint_executor.submit(_warm)
+
+    log.info("session %s created | uid=%s mode=%s model=%s stt=%s lang=%s",
+             s.id, uid or "-", s.mode, s.model, s.stt_model, s.source_lang)
+    return {"session_id": s.id}
+
+
+# ── per-session pipeline (module-level; everything reads the session) ────────
+
+def _save_chunk(s: LiveSession, n: int, wav_bytes: bytes, record: dict) -> None:
+    try:
+        with open(os.path.join(s.session_dir, f"{n:04d}.wav"), "wb") as f:
+            f.write(wav_bytes)
+        with open(os.path.join(s.session_dir, "session.jsonl"), "a") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as exc:
+        log.info("#%d chunk save failed (%s)", n, exc)
+
+
+def _update_summary(s: LiveSession) -> None:
+    try:
+        end = len(s.turns) - MAX_HISTORY
+        if end <= s.summary_state["upto"]:
+            return
+        lines = [_label(t, sp) for t, sp in s.turns[s.summary_state["upto"]:end]]
+        s.summary_state["summary"] = _summarize_history(
+            lines, s.summary_state["summary"], s.anthropic_client)
+        s.summary_state["upto"] = end
+        log.info("summary updated (folded %d turns): %r",
+                 len(lines), s.summary_state["summary"][:80])
+    except Exception as exc:
+        log.info("summary update failed (%s)", exc)
+    finally:
+        s.summary_state["busy"] = False
+
+
+def _translate_turn(s: LiveSession, n: int, text: str, wav_bytes: bytes,
+                    t0: float, stt_ms: int, merged: int) -> dict:
+    """Diarize + (interpret) translate an assembled sentence; log and record."""
+    speaker = ""
+    sim = -1.0
+    if s.diarize:
+        try:
+            emb = _embedder.embed(wav_bytes)
+            if emb is not None:
+                _, speaker, sim = s.speaker_book.assign(emb)
+        except Exception as exc:
+            log.info("#%d diarize skipped (%s)", n, exc)
+
+    s.turns.append((text, speaker))
+    # Verbatim window extends back to the summary watermark (full coverage).
+    start = max(s.summary_state["upto"], len(s.turns) - MAX_VERBATIM)
+    start = min(start, max(0, len(s.turns) - MAX_HISTORY))
+    window = s.turns[start:]
+
+    english, repaired = "", False
+    if s.is_interview:
+        hint_ctx = [_label(t, sp) for t, sp in window[:-1]]
+    else:
+        english, repaired = _translate_with_context(
+            text, [t for t, _ in window], s.anthropic_client,
+            model=s.model, lang_name=s.lang_name, context=s.context,
+            glossary=s.glossary_prompt, speaker=speaker,
+            speakers=[sp for _, sp in window], participants=s.participants,
+            summary=s.summary_state["summary"], diarized=s.diarize,
+        )
+    t3 = time.perf_counter()
+
+    total_ms = int((t3 - t0) * 1000)
+    log.info(
+        "#%d stt %dms %r | merged=%d | %s sim=%.2f | mt %dms%s %r | total %dms",
+        n, stt_ms, text[:40], merged, speaker or "-", sim,
+        (t3 - t0) * 1000 - stt_ms, " repaired" if repaired else "",
+        (english or "")[:40], total_ms,
+    )
+    if s.session_dir:
+        _save_chunk(s, n, wav_bytes, {
+            "seq": n, "ts": time.time(), "speaker": speaker,
+            "sim": round(sim, 3), "source": text, "english": english or "",
+            "repaired": repaired, "ms": total_ms, "merged": merged,
+        })
+    result = {"source": text, "english": english or "", "repaired": repaired,
+              "speaker": speaker, "ms": total_ms}
+    if s.is_interview:
+        result["hint_ctx"] = hint_ctx
+    return result
+
+
+def _process_chunk(s: LiveSession, n: int, raw_bytes: bytes) -> dict:
+    """Blocking pipeline step (runs on the executor): decode → STT → assemble."""
+    t0 = time.perf_counter()
+    if len(raw_bytes) < 1000:
+        log.info("#%d skipped (%d bytes, too short)", n, len(raw_bytes))
+        return {"skipped": True}
+    try:
+        wav_bytes = _to_wav(raw_bytes)
+    except Exception as exc:
+        log.info("#%d skipped (decode failed: %s)", n, exc)
+        return {"skipped": True}
+    t1 = time.perf_counter()
+
+    prompt = " ".join(t for t, _ in s.turns[-3:])[-STT_PROMPT_CHARS:]
+    text = transcribe(wav_bytes, s.openai_client, prompt=prompt,
+                      source_lang=s.source_lang, model=s.stt_model,
+                      glossary=s.glossary_stt)
+    t2 = time.perf_counter()
+    stt_ms = int((t2 - t1) * 1000)
+    if not text.strip():
+        log.info("#%d skipped (no speech) | wav %dms | stt %dms",
+                 n, (t1 - t0) * 1000, stt_ms)
+        return {"skipped": True}
+
+    dur_s = max(0.0, (len(wav_bytes) - 44) / 2 / 16000)
+    s.pending_wav = wav_bytes
+    assembled = s.assembler.add(text, dur_s)
+    if assembled is None:
+        log.info("#%d buffered (mid-sentence) %r", n, text[:40])
+        return {"buffered": True}
+
+    return _translate_turn(s, n, assembled, wav_bytes, t0, stt_ms,
+                           s.assembler.last_merged)
+
+
+def _flush_pending(s: LiveSession, n: int) -> dict:
+    text = s.assembler.flush()
+    if not text:
+        return {"skipped": True}
+    return _translate_turn(s, n, text, s.pending_wav, time.perf_counter(),
+                           0, s.assembler.last_merged)
+
+
+def _hint_work(s: LiveSession, utt_id: str, text: str, speaker: str,
+               hint_ctx: list[str]) -> None:
+    """Generate interview hints on the hint executor — deliberately independent
+    of any event loop or connection, so a hint that completes while the client
+    is disconnected still lands in the ring and replays on reconnect."""
+    t0 = time.perf_counter()
+
+    def on_partial(partial: dict) -> None:
+        s.emit_threadsafe("hint.partial", {"utt_id": utt_id, **partial})
+
+    try:
+        hint = generate_hints(text, hint_ctx, s.profile, s.anthropic_client,
+                              context=s.context, speaker=speaker,
+                              company_brief=s.brief_state["brief"],
+                              on_partial=on_partial)
+        hint["ms"] = int((time.perf_counter() - t0) * 1000)
+        log.info("%s hint %dms | q=%s searched=%s %r", utt_id, hint["ms"],
+                 hint["is_question"], hint["searched"], hint["gist"][:30])
+        s.emit_threadsafe("hint.final", {"utt_id": utt_id, **hint})
+    except Exception as exc:
+        log.info("%s hint delivery failed (%s)", utt_id, exc)
+        s.emit_threadsafe("hint.final", {"utt_id": utt_id, "is_question": False,
+                                         "gist": "", "bullets": [], "angle": "",
+                                         "searched": False, "ms": 0})
+
+
+async def _emit_turn_events(s: LiveSession, n: int, result: dict) -> None:
+    """transcript.final, then mode-specific follow-ups."""
+    utt_id = f"u{n}"
+    await s.emit("transcript.final", {
+        "utt_id": utt_id, "channel": "mixed",
+        "speaker": result.get("speaker", ""), "text": result["source"],
+        "lang": s.source_lang,
+    })
+    if "hint_ctx" in result:
+        if looks_like_question(result["source"]):
+            await s.emit("hint.pending", {"utt_id": utt_id})
+            _hint_executor.submit(_hint_work, s, utt_id, result["source"],
+                                  result.get("speaker", ""), result["hint_ctx"])
+        else:
+            log.info("#%d hint gated out (not question-like)", n)
+    else:
+        await s.emit("translation.final", {
+            "utt_id": utt_id, "english": result["english"],
+            "repaired": result.get("repaired", False), "ms": result["ms"],
+        })
+    # Fold aging turns into the rolling summary — off the hot path.
+    if (len(s.turns) % SUMMARY_EVERY == 0 and len(s.turns) > MAX_HISTORY
+            and not s.summary_state["busy"]):
+        s.summary_state["busy"] = True
+        _summary_executor.submit(_update_summary, s)
+
+
+# ── WebSocket — the dumb pipe ────────────────────────────────────────────────
 
 @app.websocket("/ws/conversation")
-async def ws_conversation(ws: WebSocket):
+async def ws_conversation(ws: WebSocket, session_id: str = Query(""),
+                          last_seq: int = Query(0)):
     await ws.accept()
+    s = _sessions.get(session_id)
+    if s is None:
+        await ws.close(code=4404)
+        return
 
-    # First frame must be a JSON config text frame
+    # Start frame authenticates this connection: {"op": "start", "id_token": …}
     try:
         raw = await asyncio.wait_for(ws.receive_text(), timeout=10)
-        cfg = json.loads(raw)
+        start = json.loads(raw)
+        assert start.get("op") == "start"
     except Exception:
         await ws.close(code=1008)
         return
-
-    uid = None
     if REQUIRE_AUTH:
         loop_ = asyncio.get_event_loop()
-        uid = await loop_.run_in_executor(
-            _executor, _verify_token, cfg.get("id_token", ""))
-        if not uid:
+        uid = await loop_.run_in_executor(_executor, _verify_token,
+                                          start.get("id_token", ""))
+        if not uid or uid != s.uid:
             await ws.close(code=4401)
             return
 
-    model = MODEL_ALIASES.get(cfg.get("model", "sonnet").lower(), cfg.get("model", "sonnet"))
-    source_lang = cfg.get("source_lang", "ja")
-    lang_name = LANGUAGE_NAMES.get(source_lang.lower(), source_lang.upper())
-    context = cfg.get("context", "")
-    stt_model = cfg.get("stt_model") or (
-        "gpt-4o-mini-transcribe" if cfg.get("mode") == "interview" else DEFAULT_STT_MODEL)
+    # Attach + replay anything missed while disconnected. Refresh the loop
+    # reference: emit_threadsafe must target the loop that owns THIS connection
+    # (matters under test clients; harmless under uvicorn's single loop).
+    s.loop = asyncio.get_running_loop()
+    s.ws = ws
+    s.disconnected_at = None
+    replayed = 0
+    for evt in list(s.ring):
+        if evt["seq"] > last_seq:
+            await ws.send_text(json.dumps(evt))
+            replayed += 1
+    await s.emit("session.status",
+                 {"state": "resumed" if s.attached_before else "live",
+                  "detail": f"replayed {replayed}" if replayed else ""})
+    s.attached_before = True
+    log.info("session %s attached | last_seq=%d replayed=%d", s.id, last_seq, replayed)
 
-    glossary = Glossary.parse(cfg.get("glossary", ""))
-    glossary_stt = glossary.format_for_stt()
-    glossary_prompt = glossary.format_for_prompt()
-
-    # Mode selects the per-turn processor: "interpret" (translate, default) or
-    # "interview" (profile-grounded answer hints). Shared: capture, STT,
-    # sentence assembly, diarization, history, session save.
-    # Interview is tuned for SPEED: faster STT model, tighter assembly caps,
-    # shorter silence flush — the translator path keeps its accuracy settings.
-    mode = cfg.get("mode", "interpret")
-    profile = cfg.get("profile", "")
-    is_interview = mode == "interview"
-    flush_timeout = 2 if is_interview else 6
-
-    participants = cfg.get("participants", "")
-    diarize = bool(cfg.get("diarize", True))
-    names = [n.strip() for n in participants.splitlines() if n.strip()]
-    speaker_book = SpeakerBook(names=names)
-
-    # Interview: pre-research the company while the user is still settling in,
-    # so company questions answer from a cached brief instead of a live search.
-    brief_state = {"brief": ""}
-    if is_interview and context.strip():
-        def _warm_brief():
-            brief_state["brief"] = build_company_brief(context, anthropic.Anthropic())
-            log.info("company brief ready (%d chars)", len(brief_state["brief"]))
-        _hint_executor.submit(_warm_brief)
-
-    anthropic_client = anthropic.Anthropic()
-    openai_client = OpenAI()
-    # One (text, speaker) tuple per processed chunk — a single list so the
-    # transcript and its speaker labels can never fall out of alignment.
-    turns: list[tuple[str, str]] = []
     loop = asyncio.get_event_loop()
-    seq = 0
-
-    # Rolling summary of turns older than the verbatim window (long-range
-    # context). Updated off the hot path; "upto" marks how far it has folded.
-    summary_state = {"summary": "", "upto": 0, "busy": False}
-
-    def update_summary() -> None:
-        try:
-            end = len(turns) - MAX_HISTORY
-            if end <= summary_state["upto"]:
-                return
-            lines = [_label(t, sp) for t, sp in turns[summary_state["upto"]:end]]
-            summary_state["summary"] = _summarize_history(
-                lines, summary_state["summary"], anthropic_client)
-            summary_state["upto"] = end
-            log.info("summary updated (folded %d turns): %r",
-                     len(lines), summary_state["summary"][:80])
-        except Exception as exc:
-            log.info("summary update failed (%s)", exc)
-        finally:
-            summary_state["busy"] = False
-
-    # Opt-in chunk recorder (see SAVE_CHUNKS_DIR above).
-    session_dir = ""
-    if SAVE_CHUNKS_DIR:
-        session_dir = os.path.join(SAVE_CHUNKS_DIR, time.strftime("%Y%m%d-%H%M%S"))
-        os.makedirs(session_dir, exist_ok=True)
-        log.info("recording chunks to %s", session_dir)
-
-    def save_chunk(n: int, wav_bytes: bytes, record: dict) -> None:
-        try:
-            with open(os.path.join(session_dir, f"{n:04d}.wav"), "wb") as f:
-                f.write(wav_bytes)
-            with open(os.path.join(session_dir, "session.jsonl"), "a") as f:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        except Exception as exc:
-            log.info("#%d chunk save failed (%s)", n, exc)
-
-    log.info("WS connected | uid=%s model=%s stt=%s lang=%s context=%r terms=%d diarize=%s participants=%d",
-             uid or "-", model, stt_model, source_lang, context, len(glossary), diarize, len(names))
-
-    # Sentence assembly: mid-sentence chunks are buffered and joined with what
-    # follows, so fragments aren't translated in isolation. pending_wav keeps
-    # the newest buffered chunk's audio for diarization at flush time.
-    assembler = ChunkAssembler(max_parts=2 if is_interview else 4)
-    pending_wav = {"wav": b""}
-
-    def translate_turn(n: int, text: str, wav_bytes: bytes, t0: float,
-                       stt_ms: int, merged: int) -> dict:
-        """Diarize + translate an assembled sentence; log and record it."""
-        speaker = ""
-        sim = -1.0
-        if diarize:
-            try:
-                emb = _embedder.embed(wav_bytes)
-                if emb is not None:
-                    _, speaker, sim = speaker_book.assign(emb)
-            except Exception as exc:
-                log.info("#%d diarize skipped (%s)", n, exc)
-
-        turns.append((text, speaker))
-        # Verbatim window: everything the summary hasn't folded yet (so
-        # summary + verbatim always cover the whole conversation), at
-        # least MAX_HISTORY turns, capped at MAX_VERBATIM.
-        start = max(summary_state["upto"], len(turns) - MAX_VERBATIM)
-        start = min(start, max(0, len(turns) - MAX_HISTORY))
-        window = turns[start:]
-
-        english, repaired = "", False
-        if mode == "interview":
-            # Hints are generated OFF the reply path (see deliver_hint below):
-            # the transcript goes out immediately and never blocks the next
-            # chunk on a slow hint (or web search). Just snapshot the context.
-            hint_ctx = [_label(t, sp) for t, sp in window[:-1]]
-        else:
-            english, repaired = _translate_with_context(
-                text, [t for t, _ in window], anthropic_client,
-                model=model, lang_name=lang_name, context=context, glossary=glossary_prompt,
-                speaker=speaker, speakers=[sp for _, sp in window], participants=participants,
-                summary=summary_state["summary"], diarized=diarize,
-            )
-        t3 = time.perf_counter()
-
-        total_ms = int((t3 - t0) * 1000)
-        log.info(
-            "#%d stt %dms %r | merged=%d | %s sim=%.2f | mt %dms%s %r | total %dms",
-            n, stt_ms, text[:40], merged, speaker or "-", sim,
-            (t3 - t0) * 1000 - stt_ms, " repaired" if repaired else "",
-            (english or "")[:40], total_ms,
-        )
-        if session_dir:
-            save_chunk(n, wav_bytes, {
-                "seq": n, "ts": time.time(), "speaker": speaker,
-                "sim": round(sim, 3), "source": text, "english": english or "",
-                "repaired": repaired, "ms": total_ms, "merged": merged,
-            })
-        result = {"source": text, "english": english or "", "speaker": speaker, "ms": total_ms}
-        if mode == "interview":
-            result["hint_ctx"] = hint_ctx
-        return result
-
-    def flush_pending(n: int) -> dict:
-        """Speaker went silent mid-buffer — translate what's pending as-is."""
-        text = assembler.flush()
-        if not text:
-            return {"skipped": True}
-        return translate_turn(n, text, pending_wav["wav"], time.perf_counter(),
-                              0, assembler.last_merged)
-
-    async def deliver_hint(n: int, text: str, speaker: str, hint_ctx: list[str]) -> None:
-        """Generate interview hints in the background and push them when ready.
-
-        The client already shows a pending card (sent by the caller); partials
-        stream into it as the tool input generates, and the final hint_only
-        message is authoritative.
-        """
-        t0 = time.perf_counter()
-
-        def on_partial(partial: dict) -> None:
-            # Called from the executor thread — hop back onto the event loop.
-            payload = json.dumps({"hint_partial": partial, "seq": n})
-            asyncio.run_coroutine_threadsafe(ws.send_text(payload), loop)
-
-        try:
-            hint = await loop.run_in_executor(
-                _hint_executor,
-                lambda: generate_hints(text, hint_ctx, profile, anthropic_client,
-                                       context=context, speaker=speaker,
-                                       company_brief=brief_state["brief"],
-                                       on_partial=on_partial))
-            total_ms = int((time.perf_counter() - t0) * 1000)
-            hint["ms"] = total_ms
-            log.info("#%d hint %dms | q=%s searched=%s %r",
-                     n, total_ms, hint["is_question"], hint["searched"], hint["gist"][:30])
-            await ws.send_text(json.dumps({
-                "hint_only": True, "hint": hint, "seq": n, "ts": time.time(),
-            }))
-        except Exception as exc:
-            log.info("#%d hint delivery failed (%s)", n, exc)
-            try:
-                await ws.send_text(json.dumps({
-                    "hint_only": True, "seq": n, "ts": time.time(),
-                    "hint": {"is_question": False, "gist": "", "bullets": [],
-                             "angle": "", "searched": False},
-                }))
-            except Exception:
-                pass
-
     try:
         while True:
-            # Receive binary audio frame (WAV bytes from browser MediaRecorder).
-            # While a partial sentence is buffered, wait at most 6s — a silent
-            # speaker means the sentence won't be continued, so flush it.
-            if assembler.pending:
+            # While a partial sentence is buffered, wait at most flush_timeout —
+            # a silent speaker means the sentence won't be continued; flush it.
+            if s.assembler.pending:
                 try:
-                    data = await asyncio.wait_for(ws.receive_bytes(), timeout=flush_timeout)
+                    data = await asyncio.wait_for(ws.receive_bytes(),
+                                                  timeout=s.flush_timeout)
                 except asyncio.TimeoutError:
-                    seq += 1
+                    s.chunk_n += 1
+                    n = s.chunk_n
                     try:
-                        result = await loop.run_in_executor(_executor, flush_pending, seq)
+                        result = await loop.run_in_executor(_executor, _flush_pending, s, n)
                     except Exception as exc:
-                        log.exception("#%d flush failed: %s", seq, exc)
-                        await ws.send_text(json.dumps({"error": str(exc), "seq": seq}))
+                        log.exception("#%d flush failed: %s", n, exc)
+                        await s.emit("error", {"scope": "utterance",
+                                               "message": str(exc), "retryable": True})
                         continue
                     if not result.get("skipped"):
-                        await ws.send_text(json.dumps({
-                            "source": result["source"],
-                            "english": result["english"],
-                            "speaker": result.get("speaker", ""),
-                            "lang_tag": source_lang.upper(),
-                            "seq": seq,
-                            "ts": time.time(),
-                            "ms": result["ms"],
-                        }))
-                        if "hint_ctx" in result:
-                            if looks_like_question(result["source"]):
-                                await ws.send_text(json.dumps({"hint_pending": True, "seq": seq}))
-                                asyncio.create_task(deliver_hint(
-                                    seq, result["source"], result.get("speaker", ""),
-                                    result["hint_ctx"]))
-                            else:
-                                log.info("#%d hint gated out (not question-like)", seq)
+                        await _emit_turn_events(s, n, result)
                     continue
             else:
                 data = await ws.receive_bytes()
-            seq += 1
-            n = seq
+            s.chunk_n += 1
+            n = s.chunk_n
 
-            # Run transcription + translation in thread pool (blocking SDK calls)
-            def process(raw_bytes: bytes) -> dict:
-                t0 = time.perf_counter()
-                if len(raw_bytes) < 1000:
-                    log.info("#%d skipped (%d bytes, too short)", n, len(raw_bytes))
-                    return {"skipped": True}
-                try:
-                    wav_bytes = _to_wav(raw_bytes)
-                except Exception as exc:
-                    log.info("#%d skipped (decode failed: %s)", n, exc)
-                    return {"skipped": True}
-                t1 = time.perf_counter()
-
-                # Continuity prompt: tail of the last few turns, not just one.
-                prompt = " ".join(t for t, _ in turns[-3:])[-STT_PROMPT_CHARS:]
-                text = transcribe(wav_bytes, openai_client, prompt=prompt,
-                                  source_lang=source_lang, model=stt_model, glossary=glossary_stt)
-                t2 = time.perf_counter()
-                stt_ms = int((t2 - t1) * 1000)
-                if not text.strip():
-                    log.info("#%d skipped (no speech) | wav %dms | stt %dms",
-                             n, (t1 - t0) * 1000, stt_ms)
-                    return {"skipped": True}
-
-                # Sentence assembly: hold visibly mid-sentence chunks and join
-                # them with what follows (or the 6s silence flush above).
-                dur_s = max(0.0, (len(wav_bytes) - 44) / 2 / 16000)
-                pending_wav["wav"] = wav_bytes
-                assembled = assembler.add(text, dur_s)
-                if assembled is None:
-                    log.info("#%d buffered (mid-sentence) %r", n, text[:40])
-                    return {"buffered": True}
-
-                return translate_turn(n, assembled, wav_bytes, t0, stt_ms,
-                                      assembler.last_merged)
-
-            # A failing chunk (bad model config, transient API error) reports
-            # an error for THAT chunk and keeps the session alive — it must
-            # not tear down the whole meeting.
+            # A failing chunk reports its error and the session continues.
             try:
-                result = await loop.run_in_executor(_executor, process, data)
+                result = await loop.run_in_executor(_executor, _process_chunk, s, n, data)
             except Exception as exc:
                 log.exception("#%d chunk failed: %s", n, exc)
-                await ws.send_text(json.dumps({"error": str(exc), "seq": n}))
+                await s.emit("error", {"scope": "utterance",
+                                       "message": str(exc), "retryable": True})
+                await s.emit("chunk.ack", {"chunk": n, "disposition": "error"})
                 continue
 
-            if result.get("buffered"):
-                await ws.send_text(json.dumps({"buffered": True, "skipped": True, "seq": n}))
-            elif result.get("skipped"):
-                await ws.send_text(json.dumps({"skipped": True, "seq": n}))
-            else:
-                await ws.send_text(json.dumps({
-                    "source": result["source"],
-                    "english": result["english"],
-                    "speaker": result.get("speaker", ""),
-                    "lang_tag": source_lang.upper(),
-                    "seq": n,
-                    "ts": time.time(),
-                    "ms": result["ms"],
-                }))
-                if "hint_ctx" in result:
-                    if looks_like_question(result["source"]):
-                        await ws.send_text(json.dumps({"hint_pending": True, "seq": n}))
-                        asyncio.create_task(deliver_hint(
-                            n, result["source"], result.get("speaker", ""),
-                            result["hint_ctx"]))
-                    else:
-                        log.info("#%d hint gated out (not question-like)", n)
-                # Fold aging turns into the rolling summary — after the reply is
-                # sent, off the hot path, never overlapping itself.
-                if (len(turns) % SUMMARY_EVERY == 0
-                        and len(turns) > MAX_HISTORY
-                        and not summary_state["busy"]):
-                    summary_state["busy"] = True
-                    _summary_executor.submit(update_summary)
+            if not (result.get("skipped") or result.get("buffered")):
+                await _emit_turn_events(s, n, result)
+            # Transitional (P1-only): the batch-capture client sends one chunk at
+            # a time and waits for this ack. Dies with the capture path in P2.
+            disposition = ("buffered" if result.get("buffered")
+                           else "skipped" if result.get("skipped") else "processed")
+            await s.emit("chunk.ack", {"chunk": n, "disposition": disposition})
 
     except WebSocketDisconnect:
-        log.info("WS disconnected after %d chunks", seq)
+        s.ws = None
+        s.disconnected_at = time.time()
+        log.info("session %s detached after %d chunks (grace %ds)",
+                 s.id, s.chunk_n, SESSION_GRACE_S)
     except Exception as exc:
-        log.exception("WS error: %s", exc)
-        try:
-            await ws.send_text(json.dumps({"error": str(exc)}))
-        except Exception:
-            pass
+        log.exception("session %s WS error: %s", s.id, exc)
+        s.ws = None
+        s.disconnected_at = time.time()
 
 
 # ── Static frontend (dev convenience) ────────────────────────────────────────

@@ -437,6 +437,8 @@ function pairHtml(source, english, langTag, notes) {
 function appendChunk({ source, english, langTag, speaker, notes, error, lagMs, ts }) {
   const pinned = isPinned();
   ts = ts || nowStamp();
+  let pairEl = null;
+  let entry = null;
 
   if (error) {
     const div = document.createElement('div');
@@ -445,7 +447,8 @@ function appendChunk({ source, english, langTag, speaker, notes, error, lagMs, t
     output.appendChild(div);
     resetTurnGrouping();
   } else {
-    transcript.push({ ts, speaker: speaker || '', source: source || '', english: english || '' });
+    entry = { ts, speaker: speaker || '', source: source || '', english: english || '' };
+    transcript.push(entry);
     const now = Date.now();
     const canGroup = lastTurn
       && lastTurn.speaker === (speaker || '')
@@ -453,10 +456,10 @@ function appendChunk({ source, english, langTag, speaker, notes, error, lagMs, t
       && lastTurn.pairs < GROUP_MAX_PAIRS;
 
     if (canGroup) {
-      const pair = document.createElement('div');
-      pair.className = 'turn-pair';
-      pair.innerHTML = pairHtml(source, english, langTag, notes);
-      lastTurn.bodyEl.appendChild(pair);
+      pairEl = document.createElement('div');
+      pairEl.className = 'turn-pair';
+      pairEl.innerHTML = pairHtml(source, english, langTag, notes);
+      lastTurn.bodyEl.appendChild(pairEl);
       lastTurn.wallMs = now;
       lastTurn.pairs += 1;
     } else {
@@ -473,6 +476,7 @@ function appendChunk({ source, english, langTag, speaker, notes, error, lagMs, t
       output.appendChild(div);
       lastTurn = { speaker: speaker || '', wallMs: now, pairs: 1,
                    bodyEl: div.querySelector('.turn-body') };
+      pairEl = div.querySelector('.turn-pair');
     }
   }
 
@@ -480,6 +484,26 @@ function appendChunk({ source, english, langTag, speaker, notes, error, lagMs, t
     output.scrollTop = output.scrollHeight;
   } else {
     jumpLatest.classList.remove('hidden');
+  }
+  // Live turns render source first; the translation attaches when it arrives.
+  return { pairEl, entry };
+}
+
+// Live-session registry: utterance id → its rendered pair + transcript entry,
+// so translation.final can attach the English line seconds after the source.
+let uttTurns = {};
+
+function attachTranslation(uttId, english) {
+  const t = uttTurns[uttId];
+  if (!t) return;
+  if (t.entry) t.entry.english = english;
+  if (t.pairEl && !t.pairEl.querySelector('.en')) {
+    const span = document.createElement('span');
+    span.className = 'en';
+    span.textContent = english;
+    const note = t.pairEl.querySelector('.note');
+    t.pairEl.insertBefore(span, note || null);
+    if (isPinned()) output.scrollTop = output.scrollHeight;
   }
 }
 
@@ -767,6 +791,122 @@ let dropped = 0;
 let meetingStart = 0;
 let elapsedTimer = null;
 
+// Server-owned session + resumable event stream (architecture v2, P1).
+let wsSessionId = null;    // backend LiveSession id
+let lastSeq = 0;           // highest envelope seq seen — reconnects replay from here
+let reconnectAttempts = 0;
+const RECONNECT_MAX = 5;
+
+function connectSessionWs() {
+  const wsUrl = apiBase().replace(/^http/, 'ws')
+    + `/ws/conversation?session_id=${encodeURIComponent(wsSessionId)}&last_seq=${lastSeq}`;
+  ws = new WebSocket(wsUrl);
+
+  ws.onopen = async () => {
+    const idToken = window.store ? await window.store.idToken() : '';
+    ws.send(JSON.stringify({ op: 'start', id_token: idToken }));
+    reconnectAttempts = 0;
+    inFlight = false;   // any chunk that was in flight during the drop is gone
+    setStatus();
+    trySend();
+  };
+
+  ws.onmessage = (evt) => {
+    const env = JSON.parse(evt.data);
+    if (env.seq) lastSeq = Math.max(lastSeq, env.seq);
+    handleSessionEvent(env);
+  };
+
+  ws.onclose = (evt) => {
+    if (evt.code === 4401) {
+      appendChunk({ error: 'Session expired — sign in again to continue.' });
+      if (active) stopConversation();
+      return;
+    }
+    if (evt.code === 4404) {
+      appendChunk({ error: 'Session ended on the server — press Start to begin a new one.' });
+      if (active) stopConversation();
+      return;
+    }
+    if (active && wsSessionId && reconnectAttempts < RECONNECT_MAX) {
+      reconnectAttempts += 1;
+      convStatus.textContent = `Reconnecting… (${reconnectAttempts})`;
+      setTimeout(() => { if (active) connectSessionWs(); }, 1000 * reconnectAttempts);
+    } else if (active) {
+      appendChunk({ error: 'Connection lost — press Start to begin a new session.' });
+      stopConversation();
+    }
+  };
+
+  ws.onerror = () => { /* onclose handles recovery */ };
+}
+
+function handleSessionEvent(env) {
+  const d = env.data || {};
+  switch (env.type) {
+    case 'transcript.final': {
+      const rendered = appendChunk({
+        source: d.text, english: '', speaker: d.speaker,
+        langTag: (d.lang || sourceLang.value).toUpperCase(),
+      });
+      uttTurns[d.utt_id] = rendered;
+      if (currentMode === 'interview') {
+        saveTurn(liveSessionId, {
+          seq: transcript.length, ts: nowStamp(), speaker: d.speaker || '',
+          source: d.text, english: '', langTag: (d.lang || 'en').toUpperCase(),
+          first: transcript.length === 1,
+        });
+      }
+      break;
+    }
+    case 'translation.final': {
+      attachTranslation(d.utt_id, d.english);
+      const t = uttTurns[d.utt_id];
+      saveTurn(liveSessionId, {
+        seq: transcript.length, ts: nowStamp(),
+        speaker: (t && t.entry && t.entry.speaker) || '',
+        source: (t && t.entry && t.entry.source) || '',
+        english: d.english, langTag: sourceLang.value.toUpperCase(),
+        first: transcript.length === 1,
+      });
+      break;
+    }
+    case 'hint.pending':
+      renderHintPending(d.utt_id);
+      break;
+    case 'hint.partial':
+      renderHintPartial(d.utt_id, d);
+      break;
+    case 'hint.final': {
+      const hint = { is_question: d.is_question, gist: d.gist, bullets: d.bullets,
+                     angle: d.angle, searched: d.searched, ms: d.ms };
+      renderHint(hint, nowStamp(), d.utt_id);
+      if (hint.is_question) {
+        saveTurn(liveSessionId, {
+          seq: transcript.length, ts: nowStamp(), speaker: '',
+          source: '', english: '', hint,
+        });
+      }
+      break;
+    }
+    case 'chunk.ack':
+      // Transitional (P1): the capture loop sends one chunk at a time and
+      // waits for this before releasing the next. Removed in P2.
+      inFlight = false;
+      setStatus();
+      trySend();
+      break;
+    case 'session.status':
+      if (d.state === 'resumed') convStatus.textContent = 'Reconnected';
+      break;
+    case 'error':
+      appendChunk({ error: d.message });
+      break;
+    default:
+      break;  // forward compatibility: ignore unknown event types
+  }
+}
+
 startBtn.addEventListener('click', () => startConversation('interpret'));
 startInterviewBtn.addEventListener('click', () => startConversation('interview'));
 stopBtn.addEventListener('click', stopConversation);
@@ -874,83 +1014,40 @@ async function startConversation(mode) {
   viewingHistory = false;
   viewingStrip.classList.add('hidden');
 
-  const wsUrl = apiBase().replace(/^http/, 'ws') + '/ws/conversation';
-  ws = new WebSocket(wsUrl);
-
-  ws.onopen = () => {
-    ws.send(JSON.stringify({
-      mode: currentMode,
-      profile: isInterview ? compileProfile() : '',
-      model: sessionModel,
-      source_lang: langCode,
-      lang_name: langName,
-      context: sessionContext,
-      glossary: sessionGlossary,
-      participants: sessionParticipants,
-      diarize: sessionDiarize,
-      id_token: idToken,
-    }));
-  };
-
-  ws.onmessage = (evt) => {
-    const msg = JSON.parse(evt.data);
-
-    // Hints arrive asynchronously, decoupled from the chunk cycle — render and
-    // return without touching the in-flight backpressure state.
-    if (msg.hint_pending) {
-      renderHintPending(msg.seq);
-      return;
-    }
-    if (msg.hint_partial) {
-      renderHintPartial(msg.seq, msg.hint_partial);
-      return;
-    }
-    if (msg.hint_only) {
-      renderHint(msg.hint, nowStamp(), msg.seq);
-      if (msg.hint && msg.hint.is_question) {
-        saveTurn(liveSessionId, {
-          seq: transcript.length, ts: nowStamp(), speaker: '',
-          source: '', english: '', hint: msg.hint,
-        });
-      }
-      return;
-    }
-
-    // Every server reply (including skips) clears the in-flight slot so the
-    // next pending chunk can go out.
-    inFlight = false;
-    const lagMs = sentAt ? Date.now() - sentAt : null;
-
-    if (msg.error) {
-      appendChunk({ error: msg.error });
-    } else if (!msg.skipped) {
-      appendChunk({
-        source: msg.source,
-        english: msg.english,
-        speaker: msg.speaker,
-        langTag: (msg.lang_tag || sourceLang.value).toUpperCase(),
-        lagMs,
-      });
-      saveTurn(liveSessionId, {
-        seq: transcript.length, ts: nowStamp(), speaker: msg.speaker || '',
-        source: msg.source, english: msg.english,
-        langTag: (msg.lang_tag || sourceLang.value).toUpperCase(),
-        first: transcript.length === 1,
-      });
-    }
-    setStatus();
-    trySend();
-  };
-
-  ws.onerror = () => {
-    appendChunk({ error: 'Connection lost — press “Start meeting” to reconnect.' });
-  };
-  ws.onclose = (evt) => {
-    if (evt.code === 4401) {
-      appendChunk({ error: 'Session expired — sign in again to continue.' });
-    }
-    if (active) stopConversation();
-  };
+  // Create the server-owned session over REST, then attach the WebSocket to
+  // it. A dropped connection re-attaches with last_seq and replays anything
+  // missed — the session (transcript, brief, summary) lives on the server.
+  let sessionRes;
+  try {
+    sessionRes = await fetch(`${apiBase()}/session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json',
+                 ...(idToken ? { 'Authorization': `Bearer ${idToken}` } : {}) },
+      body: JSON.stringify({
+        mode: currentMode,
+        profile: isInterview ? compileProfile() : '',
+        model: sessionModel,
+        source_lang: langCode,
+        lang_name: langName,
+        context: sessionContext,
+        glossary: sessionGlossary,
+        participants: sessionParticipants,
+        diarize: sessionDiarize,
+      }),
+    });
+    if (!sessionRes.ok) throw new Error(`session create failed (${sessionRes.status})`);
+  } catch (err) {
+    statusEl.textContent = 'Could not reach the backend — check the connection and try again.';
+    [micStream, displayStream].forEach(st => st && st.getTracks().forEach(t => t.stop()));
+    micStream = displayStream = null;
+    if (audioCtx) { audioCtx.close(); audioCtx = null; }
+    return;
+  }
+  wsSessionId = (await sessionRes.json()).session_id;
+  lastSeq = 0;
+  reconnectAttempts = 0;
+  uttTurns = {};
+  connectSessionWs();
 
   active = true;
   inFlight = false;
@@ -1049,6 +1146,7 @@ function stopConversation() {
   });
   activeStream = micStream = displayStream = null;
   if (audioCtx) { audioCtx.close(); audioCtx = null; analyser = null; vadBuf = null; }
+  wsSessionId = null;   // before close, so onclose doesn't try to reconnect
   if (ws) { ws.close(); ws = null; }
   if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
   document.body.classList.remove('live');
