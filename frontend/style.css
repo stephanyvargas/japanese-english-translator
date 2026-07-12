@@ -513,6 +513,13 @@ body.live .transcript { max-height: none; }
   padding-top: 8px;
 }
 
+/* Live partial transcript (streaming ASR): grey, updating in place. */
+.turn-partial {
+  color: var(--nezumi);
+  font-style: italic;
+  padding-left: 15px;
+}
+
 /* Turn anatomy: meta line, then JA/EN hanging from a speaker-colored rail */
 
 .turn { --rail: var(--nezumi); }

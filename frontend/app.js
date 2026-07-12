@@ -793,9 +793,37 @@ let elapsedTimer = null;
 
 // Server-owned session + resumable event stream (architecture v2, P1).
 let wsSessionId = null;    // backend LiveSession id
+let streamingSession = false;  // P2: server transcribes a continuous PCM stream
+let workletNode = null;
+let partialEls = {};       // utt_id → live partial-transcript line element
 let lastSeq = 0;           // highest envelope seq seen — reconnects replay from here
 let reconnectAttempts = 0;
 const RECONNECT_MAX = 5;
+
+// P2 streaming capture: an AudioWorklet forwards raw PCM (24kHz mono Int16,
+// ~100ms frames) straight to the session socket. The server-side Realtime API
+// does the voice-activity detection — no MediaRecorder, no chunk boundaries.
+async function startPcmStream() {
+  const code = "class F extends AudioWorkletProcessor{process(i){const c=i[0][0];if(c)this.port.postMessage(c.slice(0));return true;}}registerProcessor('pcm-fwd',F);";
+  const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
+  await audioCtx.audioWorklet.addModule(url);
+  workletNode = new AudioWorkletNode(audioCtx, 'pcm-fwd');
+  audioCtx.createMediaStreamSource(activeStream).connect(workletNode);
+  let buf = new Float32Array(0);
+  workletNode.port.onmessage = (e) => {
+    const merged = new Float32Array(buf.length + e.data.length);
+    merged.set(buf); merged.set(e.data, buf.length);
+    buf = merged;
+    if (buf.length >= 2400) {   // 100ms at 24kHz
+      const pcm = new Int16Array(buf.length);
+      for (let i = 0; i < buf.length; i++) {
+        pcm[i] = Math.max(-32768, Math.min(32767, Math.round(buf[i] * 32767)));
+      }
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(pcm.buffer);
+      buf = new Float32Array(0);
+    }
+  };
+}
 
 function connectSessionWs() {
   const wsUrl = apiBase().replace(/^http/, 'ws')
@@ -844,7 +872,23 @@ function connectSessionWs() {
 function handleSessionEvent(env) {
   const d = env.data || {};
   switch (env.type) {
+    case 'transcript.partial': {
+      let el = partialEls[d.utt_id];
+      if (!el) {
+        el = document.createElement('div');
+        el.className = 'turn-partial';
+        output.appendChild(el);
+        partialEls[d.utt_id] = el;
+      }
+      el.textContent = d.text;
+      if (isPinned()) output.scrollTop = output.scrollHeight;
+      break;
+    }
     case 'transcript.final': {
+      if (partialEls[d.utt_id]) {
+        partialEls[d.utt_id].remove();
+        delete partialEls[d.utt_id];
+      }
       const rendered = appendChunk({
         source: d.text, english: '', speaker: d.speaker,
         langTag: (d.lang || sourceLang.value).toUpperCase(),
@@ -954,7 +998,9 @@ async function startConversation(mode) {
     return;
   }
 
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  // 24kHz context serves all paths: VAD metering, tab+mic mixing, and the
+  // streaming-ASR PCM pipeline (which requires this exact rate).
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
 
   // Interview mode: the interviewer usually comes through headphones, which the
   // mic never hears — mix in the meeting tab's audio via screen-share capture.
@@ -1043,10 +1089,13 @@ async function startConversation(mode) {
     if (audioCtx) { audioCtx.close(); audioCtx = null; }
     return;
   }
-  wsSessionId = (await sessionRes.json()).session_id;
+  const sessionInfo = await sessionRes.json();
+  wsSessionId = sessionInfo.session_id;
+  streamingSession = !!sessionInfo.streaming;
   lastSeq = 0;
   reconnectAttempts = 0;
   uttTurns = {};
+  partialEls = {};
   connectSessionWs();
 
   active = true;
@@ -1077,9 +1126,16 @@ async function startConversation(mode) {
   elapsedTimer = setInterval(tickElapsed, 1000);
   setStatus();
 
-  // Cycle stop/start so each recording is a complete, self-contained WebM file.
-  // Using timeslice produces headerless continuation chunks that Whisper rejects.
-  recordCycle();
+  if (streamingSession) {
+    // P2 streaming: continuous PCM to the server; the Realtime API's VAD
+    // segments utterances. No MediaRecorder, no chunk cycle, no backpressure.
+    convStatus.textContent = 'Listening…';
+    startPcmStream();
+  } else {
+    // Cycle stop/start so each recording is a complete, self-contained WebM
+    // file. Using timeslice produces headerless chunks that Whisper rejects.
+    recordCycle();
+  }
 }
 
 // Root-mean-square loudness of the current mic frame, 0..~1.
@@ -1145,6 +1201,9 @@ function stopConversation() {
     if (s) s.getTracks().forEach(t => t.stop());
   });
   activeStream = micStream = displayStream = null;
+  if (workletNode) { try { workletNode.disconnect(); } catch (e) {} workletNode = null; }
+  partialEls = {};
+  streamingSession = false;
   if (audioCtx) { audioCtx.close(); audioCtx = null; analyser = null; vadBuf = null; }
   wsSessionId = null;   // before close, so onclose doesn't try to reconnect
   if (ws) { ws.close(); ws = null; }

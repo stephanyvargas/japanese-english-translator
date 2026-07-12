@@ -40,6 +40,7 @@ from translator.diarizer import SpeakerBook, SpeakerEmbedder  # noqa: E402
 from translator.glossary import Glossary  # noqa: E402
 from translator.interview import build_company_brief, generate_hints, looks_like_question  # noqa: E402
 from translator.profile_ingest import extract_document, summarize_repo  # noqa: E402
+from translator.realtime_stt import RealtimeTranscriber  # noqa: E402
 from translator.pipeline import _label, _summarize_history, _translate_with_context, run  # noqa: E402
 from translator.transcriber import DEFAULT_STT_MODEL, transcribe  # noqa: E402
 
@@ -106,6 +107,11 @@ SAVE_CHUNKS_DIR = os.environ.get("SAVE_CHUNKS_DIR", "").strip()
 # When REQUIRE_AUTH=1 (production), every WS connection and /translate request
 # must carry a valid Firebase ID token — protects the public Cloud Run URL from
 # anonymous use of the API keys. Off by default for local dev.
+# P2 (architecture v2): interview sessions transcribe over the OpenAI Realtime
+# API (continuous PCM from the browser, server-side VAD, ~1s-after-speech
+# finals) instead of the VAD-chunk → WebM → batch-STT path. Flag to disable.
+STREAMING_ASR = os.environ.get("STREAMING_ASR", "1") == "1"
+
 REQUIRE_AUTH = os.environ.get("REQUIRE_AUTH", "") == "1"
 FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "japanese-translator-501010")
 
@@ -299,6 +305,11 @@ class LiveSession:
         self.anthropic_client = anthropic.Anthropic()
         self.openai_client = OpenAI()
 
+        # P2: streaming ASR (interview only for now; interpret stays batch
+        # until the P4 eval gate passes).
+        self.streaming = STREAMING_ASR and self.is_interview
+        self.transcriber: RealtimeTranscriber | None = None
+
         self.seq = 0
         self._lock = threading.Lock()
         self.ring: deque = deque(maxlen=SESSION_RING)
@@ -355,6 +366,8 @@ def _reap_sessions() -> None:
     for sid, s in list(_sessions.items()):
         if s.ws is None and s.disconnected_at and now - s.disconnected_at > SESSION_GRACE_S:
             del _sessions[sid]
+            if s.transcriber is not None:
+                asyncio.get_event_loop().create_task(s.transcriber.close())
             log.info("session %s reaped after %ds idle", sid, SESSION_GRACE_S)
 
 
@@ -381,7 +394,7 @@ async def create_session(cfg: dict, authorization: str = Header(default="")):
 
     log.info("session %s created | uid=%s mode=%s model=%s stt=%s lang=%s",
              s.id, uid or "-", s.mode, s.model, s.stt_model, s.source_lang)
-    return {"session_id": s.id}
+    return {"session_id": s.id, "streaming": s.streaming, "pcm_rate": 24000}
 
 
 # ── per-session pipeline (module-level; everything reads the session) ────────
@@ -561,6 +574,48 @@ async def _emit_turn_events(s: LiveSession, n: int, result: dict) -> None:
         _summary_executor.submit(_update_summary, s)
 
 
+# ── P2: streaming-ASR path (interview) ──────────────────────────────────────
+
+def _handle_streamed_final(s: LiveSession, utt_id: str, text: str) -> None:
+    """A finalized utterance from the Realtime API — runs on the session loop.
+
+    Interview processing only (interpret stays batch in P2): record the turn,
+    emit transcript.final, and gate into the hint engine. No diarization —
+    channel identity arrives in P3; the question gate carries attribution.
+    """
+    s.turns.append((text, ""))
+    asyncio.create_task(s.emit("transcript.final", {
+        "utt_id": utt_id, "channel": "mixed", "speaker": "",
+        "text": text, "lang": s.source_lang,
+    }))
+    if looks_like_question(text):
+        start = max(s.summary_state["upto"], len(s.turns) - MAX_VERBATIM)
+        start = min(start, max(0, len(s.turns) - MAX_HISTORY))
+        hint_ctx = [_label(t, sp) for t, sp in s.turns[start:-1]]
+        asyncio.create_task(s.emit("hint.pending", {"utt_id": utt_id}))
+        _hint_executor.submit(_hint_work, s, utt_id, text, "", hint_ctx)
+    else:
+        log.info("%s hint gated out (not question-like)", utt_id)
+    if s.session_dir:
+        _save_chunk(s, len(s.turns), b"", {
+            "seq": len(s.turns), "ts": time.time(), "speaker": "",
+            "source": text, "english": "", "streamed": True,
+        })
+
+
+def _make_transcriber(s: LiveSession) -> RealtimeTranscriber:
+    def on_partial(utt_id: str, text: str) -> None:
+        asyncio.create_task(s.emit("transcript.partial", {
+            "utt_id": utt_id, "channel": "mixed", "text": text}))
+
+    def on_final(utt_id: str, text: str) -> None:
+        _handle_streamed_final(s, utt_id, text)
+
+    return RealtimeTranscriber(on_partial, on_final,
+                               language=s.source_lang or "en",
+                               prompt=s.glossary_stt)
+
+
 # ── WebSocket — the dumb pipe ────────────────────────────────────────────────
 
 @app.websocket("/ws/conversation")
@@ -607,6 +662,17 @@ async def ws_conversation(ws: WebSocket, session_id: str = Query(""),
 
     loop = asyncio.get_event_loop()
     try:
+        if s.streaming:
+            # P2 streaming path: the browser sends continuous 24kHz PCM frames;
+            # the Realtime API's server VAD segments utterances and its
+            # callbacks (on the session loop) drive transcript/hint events.
+            # No chunking, no assembly, no backpressure, no chunk.ack.
+            if s.transcriber is None:
+                s.transcriber = _make_transcriber(s)
+            while True:
+                pcm = await ws.receive_bytes()
+                await s.transcriber.send_audio(pcm)
+
         while True:
             # While a partial sentence is buffered, wait at most flush_timeout —
             # a silent speaker means the sentence won't be continued; flush it.
