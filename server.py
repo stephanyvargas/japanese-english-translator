@@ -41,7 +41,8 @@ from translator.glossary import Glossary  # noqa: E402
 from translator.interview import build_company_brief, generate_hints, looks_like_question  # noqa: E402
 from translator.profile_ingest import extract_document, summarize_repo  # noqa: E402
 from translator.realtime_stt import RealtimeTranscriber  # noqa: E402
-from translator.pipeline import _label, _summarize_history, _translate_with_context, run  # noqa: E402
+from translator.pipeline import (  # noqa: E402
+    _label, _summarize_history, _translate_with_context, run, summarize_highlights)
 from translator.transcriber import DEFAULT_STT_MODEL, transcribe  # noqa: E402
 
 # Shared across connections — model/state is loaded once, embedding is stateless.
@@ -71,6 +72,11 @@ _summary_executor = ThreadPoolExecutor(max_workers=1)
 # hint follows as its own WS message) — own workers so a slow web search never
 # competes with transcription.
 _hint_executor = ThreadPoolExecutor(max_workers=2)
+
+# The reader-facing highlights panel (interpret mode) refreshes on a timer, off
+# every hot path — its own worker so it never delays translation or its summary.
+_notes_executor = ThreadPoolExecutor(max_workers=1)
+NOTES_INTERVAL_S = 120   # how often the highlights panel refreshes
 
 LANGUAGE_NAMES = {
     "en": "English",
@@ -261,7 +267,8 @@ async def profile_github(req: RepoRequest, authorization: str = Header(default="
 # from the ring. Every server→client frame is a versioned envelope:
 #   {v, sid, seq, ts, type, data}
 # Event types: transcript.final · translation.final · hint.pending|partial|final
-# · chunk.ack (transitional, dies with the batch-capture path in P2) ·
+# · notes.updated (interpret-mode highlights panel, timer-driven) ·
+# chunk.ack (transitional, dies with the batch-capture path in P2) ·
 # session.status · error.
 
 SESSION_RING = 500          # replayable events kept per session
@@ -300,6 +307,11 @@ class LiveSession:
         self.turns: list[tuple[str, str]] = []
         self.summary_state = {"summary": "", "upto": 0, "busy": False}
         self.brief_state = {"brief": ""}
+        # Reader-facing highlights panel (interpret mode). notes_feed holds the
+        # translated lines the highlighter folds from; notes_state["upto"] is how
+        # far it has consumed. Refreshed by _notes_ticker every NOTES_INTERVAL_S.
+        self.notes_feed: list[str] = []
+        self.notes_state = {"notes": "", "upto": 0, "busy": False}
         self.chunk_n = 0
 
         self.anthropic_client = anthropic.Anthropic()
@@ -392,6 +404,10 @@ async def create_session(cfg: dict, authorization: str = Header(default="")):
             log.info("session %s company brief ready (%d chars)", s.id, len(s.brief_state["brief"]))
         _hint_executor.submit(_warm)
 
+    if not s.is_interview:
+        # Interpret mode gets a live highlights panel refreshed on a timer.
+        asyncio.create_task(_notes_ticker(s))
+
     log.info("session %s created | uid=%s mode=%s model=%s stt=%s lang=%s",
              s.id, uid or "-", s.mode, s.model, s.stt_model, s.source_lang)
     return {"session_id": s.id, "streaming": s.streaming, "pcm_rate": 24000}
@@ -426,6 +442,52 @@ def _update_summary(s: LiveSession) -> None:
         s.summary_state["busy"] = False
 
 
+def _update_notes(s: LiveSession) -> bool:
+    """Fold new translated lines into the highlights panel. Runs on
+    _notes_executor. Returns True if the panel text changed."""
+    try:
+        end = len(s.notes_feed)
+        if end <= s.notes_state["upto"]:
+            return False
+        new_lines = s.notes_feed[s.notes_state["upto"]:end]
+        notes = summarize_highlights(
+            new_lines, s.notes_state["notes"], s.anthropic_client)
+        s.notes_state["upto"] = end
+        if notes == s.notes_state["notes"]:
+            return False
+        s.notes_state["notes"] = notes
+        log.info("highlights refreshed (folded %d lines, %d chars)",
+                 len(new_lines), len(notes))
+        return True
+    except Exception as exc:
+        log.info("highlights refresh failed (%s)", exc)
+        return False
+
+
+async def _notes_ticker(s: LiveSession) -> None:
+    """Refresh the interpret-mode highlights panel every NOTES_INTERVAL_S,
+    independent of connection state: an update generated while the client is
+    briefly disconnected lands in the ring and replays on reconnect. Ends when
+    the session is reaped."""
+    loop = asyncio.get_running_loop()
+    while s.id in _sessions:
+        try:
+            await asyncio.sleep(NOTES_INTERVAL_S)
+        except asyncio.CancelledError:
+            return
+        if s.id not in _sessions:
+            return
+        if len(s.notes_feed) <= s.notes_state["upto"]:
+            continue   # nothing new said since the last refresh
+        changed = await loop.run_in_executor(_notes_executor, _update_notes, s)
+        if changed:
+            await s.emit("notes.updated", {
+                "notes": s.notes_state["notes"],
+                "upto": s.notes_state["upto"],
+                "at": time.time(),
+            })
+
+
 def _translate_turn(s: LiveSession, n: int, text: str, wav_bytes: bytes,
                     t0: float, stt_ms: int, merged: int) -> dict:
     """Diarize + (interpret) translate an assembled sentence; log and record."""
@@ -456,6 +518,9 @@ def _translate_turn(s: LiveSession, n: int, text: str, wav_bytes: bytes,
             speakers=[sp for _, sp in window], participants=s.participants,
             summary=s.summary_state["summary"], diarized=s.diarize,
         )
+        if english:
+            # Feed the highlights panel from the polished English the user reads.
+            s.notes_feed.append(_label(english, speaker))
     t3 = time.perf_counter()
 
     total_ms = int((t3 - t0) * 1000)

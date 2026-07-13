@@ -460,9 +460,59 @@ textarea { resize: vertical; }
   50% { opacity: 0.55; }
 }
 
+/* ── Highlights panel (interpret mode) ──────────────────────────────────── */
+
+.notes-panel {
+  flex: 0 0 300px;
+  display: flex;
+  flex-direction: column;
+}
+
+.notes-stamp {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--nezumi);
+}
+
+.notes-body {
+  flex: 1;
+  overflow-y: auto;
+  padding-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.notes-body:empty::before {
+  content: 'Highlights of the meeting build here, refreshed every couple of minutes.';
+  color: var(--nezumi);
+  font-style: italic;
+  font-size: 0.85rem;
+}
+
+.notes-section {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--ai);
+  margin-top: 8px;
+}
+.notes-section:first-child { margin-top: 0; }
+
+.notes-bullet {
+  font-size: 0.92rem;
+  line-height: 1.42;
+  padding-left: 14px;
+  text-indent: -14px;
+}
+.notes-bullet::before { content: '– '; color: var(--ai); }
+
+.notes-line { font-size: 0.92rem; line-height: 1.42; }
+
 @media (max-width: 780px) {
   .workspace { flex-direction: column; }
-  .hints-panel { flex: none; max-height: 40vh; }
+  .hints-panel, .notes-panel { flex: none; max-height: 40vh; }
 }
 
 /* ── Transcript ─────────────────────────────────────────────────────────── */
@@ -509,8 +559,10 @@ body:not(.live) .transcript { max-height: 40vh; }
    page itself never scrolls, so the transcript auto-follows at its bottom
    while the newest hint card stays visible at the panel's top. */
 body.live .transcript { max-height: calc(100vh - 230px); }
-body.live .hints-panel { position: sticky; top: 60px; align-self: flex-start; }
-body.live .hints-list { max-height: calc(100vh - 270px); overflow-y: auto; }
+body.live .hints-panel,
+body.live .notes-panel { position: sticky; top: 60px; align-self: flex-start; }
+body.live .hints-list,
+body.live .notes-body { max-height: calc(100vh - 270px); overflow-y: auto; }
 
 .transcript:empty::before {
   content: 'Press “Start meeting” — the mic listens and segments on natural pauses.';

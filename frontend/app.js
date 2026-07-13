@@ -49,6 +49,9 @@ const startInterviewBtn = document.getElementById('startInterviewBtn');
 const prepInterviewStatus = document.getElementById('prepInterviewStatus');
 const hintsPanel   = document.getElementById('hintsPanel');
 const hintsList    = document.getElementById('hintsList');
+const notesPanel   = document.getElementById('notesPanel');
+const notesBody    = document.getElementById('notesBody');
+const notesStamp   = document.getElementById('notesStamp');
 
 const gate         = document.getElementById('gate');
 const gateStatus   = document.getElementById('gateStatus');
@@ -362,6 +365,37 @@ function renderHint(hint, ts, seq) {
     hintsList.prepend(el);
     hintsList.scrollTop = 0;
   }
+}
+
+// Highlights panel (interpret mode): the server folds the meeting into a small
+// markdown doc every couple of minutes. Render **Section** labels and - bullets
+// into safe DOM (no innerHTML from model text); inline **bold** kept as-is text.
+function renderNotes(md, atMs) {
+  notesBody.innerHTML = '';
+  (md || '').split('\n').forEach(raw => {
+    const line = raw.trim();
+    if (!line) return;
+    const section = line.match(/^\*\*(.+?)\*\*:?\s*$/);
+    if (section) {
+      const h = document.createElement('div');
+      h.className = 'notes-section';
+      h.textContent = section[1];
+      notesBody.appendChild(h);
+      return;
+    }
+    const el = document.createElement('div');
+    const bullet = line.match(/^[-*•]\s+(.*)$/);
+    el.className = bullet ? 'notes-bullet' : 'notes-line';
+    el.textContent = (bullet ? bullet[1] : line).replace(/\*\*/g, '');
+    notesBody.appendChild(el);
+  });
+  const when = atMs ? new Date(atMs).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : '';
+  notesStamp.textContent = when ? `Updated ${when}` : '';
+}
+
+function resetNotes() {
+  notesBody.innerHTML = '';
+  notesStamp.textContent = '';
 }
 
 // ── Meeting setup fold ────────────────────────────────────────────────────────
@@ -682,6 +716,7 @@ async function openSession(id) {
     if (t.hint) renderHint(t.hint, t.ts);
   });
   hintsPanel.classList.toggle('hidden', !(s.turns || []).some(t => t.hint));
+  notesPanel.classList.add('hidden');   // highlights are live-only, not persisted
   output.scrollTop = 0;
 }
 
@@ -942,6 +977,9 @@ function handleSessionEvent(env) {
       setStatus();
       trySend();
       break;
+    case 'notes.updated':
+      renderNotes(d.notes, d.at ? d.at * 1000 : Date.now());
+      break;
     case 'session.status':
       if (d.state === 'resumed') convStatus.textContent = 'Reconnected';
       break;
@@ -1119,9 +1157,12 @@ async function startConversation(mode) {
     hintsList.innerHTML = '';
   pendingCards = {};
     hintsPanel.classList.remove('hidden');
+    notesPanel.classList.add('hidden');
     document.body.classList.add('interview');
   } else {
     hintsPanel.classList.add('hidden');
+    resetNotes();
+    notesPanel.classList.remove('hidden');
     document.body.classList.remove('interview');
   }
   document.body.classList.add('live');
@@ -1213,6 +1254,7 @@ function stopConversation() {
   if (ws) { ws.close(); ws = null; }
   if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
   document.body.classList.remove('live');
+  notesPanel.classList.add('hidden');
   startBtn.disabled = false;
   stopBtn.disabled = true;
   convStatus.textContent = '';
