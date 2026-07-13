@@ -188,8 +188,13 @@ gcloud run deploy translator-backend \
   --allow-unauthenticated \
   --timeout 3600 \
   --memory 1Gi \
+  --session-affinity \
   --set-secrets ANTHROPIC_API_KEY=anthropic-api-key:latest,OPENAI_API_KEY=openai-api-key:latest \
-  --set-env-vars "^|^ALLOWED_ORIGINS=https://japanese-translator-501010.web.app,https://japanese-translator-501010.firebaseapp.com|REQUIRE_AUTH=1"
+  --set-env-vars "^|^ALLOWED_ORIGINS=https://japanese-translator-501010.web.app,https://japanese-translator-501010.firebaseapp.com|REQUIRE_AUTH=1|STREAMING_ASR=1"
+
+# --session-affinity is required: live sessions (ring buffer + realtime STT
+# socket) are in-memory per instance, so reconnects must land on the same one.
+# STREAMING_ASR=1 keeps interview mode on the Realtime streaming path.
 
 # Frontend + Firestore rules → Firebase
 firebase deploy --only hosting,firestore:rules

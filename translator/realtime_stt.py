@@ -28,8 +28,11 @@ log = logging.getLogger("translator")
 
 REALTIME_URL = "wss://api.openai.com/v1/realtime?intent=transcription"
 PCM_RATE = 24000
-DEFAULT_MODEL = "gpt-4o-mini-transcribe"
-VAD_SILENCE_MS = 350   # server VAD: how much trailing silence ends an utterance
+# Full gpt-4o-transcribe: in the streaming path the model transcribes committed
+# utterances server-side, so the accuracy upgrade over -mini costs almost no
+# latency (probed: final +0.47s after VAD stop). Override via INTERVIEW_STT_MODEL.
+DEFAULT_MODEL = os.environ.get("INTERVIEW_STT_MODEL", "gpt-4o-transcribe")
+VAD_SILENCE_MS = 500   # gentler than 350 — fewer utterances clipped mid-sentence
 
 
 class RealtimeTranscriber:
@@ -65,6 +68,7 @@ class RealtimeTranscriber:
                 "type": "transcription",
                 "audio": {"input": {
                     "format": {"type": "audio/pcm", "rate": PCM_RATE},
+                    "noise_reduction": {"type": "near_field"},
                     "transcription": transcription,
                     "turn_detection": {"type": "server_vad",
                                        "silence_duration_ms": VAD_SILENCE_MS},
@@ -105,28 +109,33 @@ class RealtimeTranscriber:
                 log.info("rt-stt reader ended (%s)", exc)
 
     async def send_audio(self, pcm: bytes) -> None:
-        """Forward one PCM frame; transparently restart the socket once if it
-        died (network blip on the OpenAI side must not kill the interview)."""
+        """Forward one PCM frame; transparently retry up to 3 socket restarts.
+        Covers both a died socket and a failed initial handshake — OpenAI
+        handshake timeouts are transient and must not kill the interview."""
         if self._closed:
             return
-        if self._ws is None:
-            await self._connect()
-        try:
-            await self._ws.send(json.dumps({
-                "type": "input_audio_buffer.append",
-                "audio": base64.b64encode(pcm).decode(),
-            }))
-        except Exception as exc:
-            if self._restarts >= 3:
-                raise
-            self._restarts += 1
-            log.info("rt-stt socket died (%s) — reconnecting (%d/3)", exc, self._restarts)
+        frame = json.dumps({
+            "type": "input_audio_buffer.append",
+            "audio": base64.b64encode(pcm).decode(),
+        })
+        while True:
             try:
-                await self._ws.close()
-            except Exception:
-                pass
-            self._ws = None
-            await self._connect()
+                if self._ws is None:
+                    await self._connect()
+                await self._ws.send(frame)
+                return
+            except Exception as exc:
+                if self._restarts >= 3:
+                    raise
+                self._restarts += 1
+                log.info("rt-stt socket lost (%s) — reconnecting (%d/3)",
+                         exc, self._restarts)
+                if self._ws is not None:
+                    try:
+                        await self._ws.close()
+                    except Exception:
+                        pass
+                    self._ws = None
 
     async def close(self) -> None:
         self._closed = True

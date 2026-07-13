@@ -994,7 +994,9 @@ async function startConversation(mode) {
   const statusEl = currentMode === 'interview' ? prepInterviewStatus : prepStatus;
   statusEl.textContent = '';
   try {
-    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
   } catch (err) {
     statusEl.textContent = 'Microphone access was denied — allow the mic and try again.';
     return;
