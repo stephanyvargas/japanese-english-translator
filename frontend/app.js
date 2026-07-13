@@ -333,6 +333,7 @@ function renderHintPending(seq) {
   card.className = 'hint-card hint-thinking';
   card.innerHTML = '<div class="hint-q">Thinking<span class="hint-dots">…</span></div>';
   hintsList.prepend(card);  // newest on top — the one you need right now
+  hintsList.scrollTop = 0;  // and make sure the top is what's visible
   pendingCards[seq] = card;
 }
 
@@ -359,6 +360,7 @@ function renderHint(hint, ts, seq) {
     el.className = 'hint-card';
     el.innerHTML = hintCardHtml(hint, meta);
     hintsList.prepend(el);
+    hintsList.scrollTop = 0;
   }
 }
 

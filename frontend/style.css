@@ -504,7 +504,13 @@ textarea { resize: vertical; }
 }
 
 body:not(.live) .transcript { max-height: 40vh; }
-body.live .transcript { max-height: none; }
+
+/* Live: both panes are pinned to the viewport and scroll INTERNALLY — the
+   page itself never scrolls, so the transcript auto-follows at its bottom
+   while the newest hint card stays visible at the panel's top. */
+body.live .transcript { max-height: calc(100vh - 230px); }
+body.live .hints-panel { position: sticky; top: 60px; align-self: flex-start; }
+body.live .hints-list { max-height: calc(100vh - 270px); overflow-y: auto; }
 
 .transcript:empty::before {
   content: 'Press “Start meeting” — the mic listens and segments on natural pauses.';
