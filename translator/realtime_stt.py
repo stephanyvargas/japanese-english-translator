@@ -123,6 +123,7 @@ class RealtimeTranscriber:
                 if self._ws is None:
                     await self._connect()
                 await self._ws.send(frame)
+                self._restarts = 0   # recovered — budget is per incident, not lifetime
                 return
             except Exception as exc:
                 if self._restarts >= 3:

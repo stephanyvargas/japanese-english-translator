@@ -312,6 +312,7 @@ class LiveSession:
         # far it has consumed. Refreshed by _notes_ticker every NOTES_INTERVAL_S.
         self.notes_feed: list[str] = []
         self.notes_state = {"notes": "", "upto": 0, "busy": False}
+        self.notes_task: asyncio.Task | None = None   # the highlights ticker
         self.chunk_n = 0
 
         self.anthropic_client = anthropic.Anthropic()
@@ -378,6 +379,8 @@ def _reap_sessions() -> None:
     for sid, s in list(_sessions.items()):
         if s.ws is None and s.disconnected_at and now - s.disconnected_at > SESSION_GRACE_S:
             del _sessions[sid]
+            if s.notes_task is not None:
+                s.notes_task.cancel()
             if s.transcriber is not None:
                 asyncio.get_event_loop().create_task(s.transcriber.close())
             log.info("session %s reaped after %ds idle", sid, SESSION_GRACE_S)
@@ -406,7 +409,9 @@ async def create_session(cfg: dict, authorization: str = Header(default="")):
 
     if not s.is_interview:
         # Interpret mode gets a live highlights panel refreshed on a timer.
-        asyncio.create_task(_notes_ticker(s))
+        # Hold a strong reference (the loop only weak-refs tasks) so it can't be
+        # GC'd mid-flight and can be cancelled cleanly on reap.
+        s.notes_task = asyncio.create_task(_notes_ticker(s))
 
     log.info("session %s created | uid=%s mode=%s model=%s stt=%s lang=%s",
              s.id, uid or "-", s.mode, s.model, s.stt_model, s.source_lang)
