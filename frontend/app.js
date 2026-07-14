@@ -9,8 +9,7 @@ const participantsEl = document.getElementById('participants');
 const diarizeEl    = document.getElementById('diarize');
 const backendUrl   = document.getElementById('backendUrl');
 
-const tabs         = document.querySelectorAll('.tab');
-const panels       = document.querySelectorAll('.panel');
+const views        = document.querySelectorAll('#setup .view');
 
 const startBtn     = document.getElementById('startBtn');
 const stopBtn      = document.getElementById('stopBtn');
@@ -28,6 +27,31 @@ const output       = document.getElementById('output');
 const clearBtn     = document.getElementById('clearBtn');
 const copyBtn      = document.getElementById('copyBtn');
 const jumpLatest   = document.getElementById('jumpLatest');
+
+const interviewRole  = document.getElementById('interviewRole');
+const interviewTerms = document.getElementById('interviewTerms');
+const profileText  = document.getElementById('profileText');
+const profileStatus = document.getElementById('profileStatus');
+const profileSelect = document.getElementById('profileSelect');
+const profileSummary = document.getElementById('profileSummary');
+const newProfileBtn = document.getElementById('newProfileBtn');
+const renameProfileBtn = document.getElementById('renameProfileBtn');
+const deleteProfileBtn = document.getElementById('deleteProfileBtn');
+const docChips     = document.getElementById('docChips');
+const docFile      = document.getElementById('docFile');
+const docNote      = document.getElementById('docNote');
+const addDocBtn    = document.getElementById('addDocBtn');
+const repoChips    = document.getElementById('repoChips');
+const repoInput    = document.getElementById('repoInput');
+const addRepoBtn   = document.getElementById('addRepoBtn');
+const captureTabEl = document.getElementById('captureTab');
+const startInterviewBtn = document.getElementById('startInterviewBtn');
+const prepInterviewStatus = document.getElementById('prepInterviewStatus');
+const hintsPanel   = document.getElementById('hintsPanel');
+const hintsList    = document.getElementById('hintsList');
+const notesPanel   = document.getElementById('notesPanel');
+const notesBody    = document.getElementById('notesBody');
+const notesStamp   = document.getElementById('notesStamp');
 
 const gate         = document.getElementById('gate');
 const gateStatus   = document.getElementById('gateStatus');
@@ -68,17 +92,311 @@ signInBtn.addEventListener('click', async () => {
 
 signOutBtn.addEventListener('click', () => window.store.signOut());
 
-// ── Tab switching ─────────────────────────────────────────────────────────────
+// ── View router: home (mode cards) → dedicated per-mode screens ──────────────
 
-tabs.forEach(tab => {
-  tab.addEventListener('click', () => {
-    tabs.forEach(t => t.classList.remove('active'));
-    panels.forEach(p => p.classList.add('hidden'));
-    tab.classList.add('active');
-    document.getElementById(`panel-${tab.dataset.tab}`).classList.remove('hidden');
-    if (tab.dataset.tab === 'history') renderHistoryList();
+function showView(name) {
+  views.forEach(v => v.classList.toggle('hidden', v.id !== `view-${name}`));
+  document.body.classList.toggle('view-home', name === 'home');
+  // The shared Meeting-setup fold serves both interpreter and typed-text —
+  // move the single element into whichever view is active.
+  if (name === 'interpret' || name === 'text') {
+    const slot = document.querySelector(`#view-${name} .setup-slot`);
+    const fold = document.getElementById('setupFold');
+    if (slot && fold && fold.parentElement !== slot) slot.appendChild(fold);
+  }
+  if (name === 'history') renderHistoryList();
+  if (name === 'interview') loadProfile();
+}
+
+document.querySelectorAll('.mode-card[data-view]').forEach(card =>
+  card.addEventListener('click', () => showView(card.dataset.view)));
+document.querySelectorAll('.back-home').forEach(btn =>
+  btn.addEventListener('click', () => showView('home')));
+
+// ── Interview mode: named profiles (bio + documents + repos) + hints ─────────
+
+let currentMode = 'interpret';   // 'interpret' | 'interview' — set at Start
+let profiles = [];
+let activeProfile = null;
+let profilesLoaded = false;
+
+function savedFlash(msg = 'Saved ✓ — loads automatically next time') {
+  profileStatus.textContent = msg;
+  setTimeout(() => { profileStatus.textContent = ''; }, 2500);
+}
+
+async function persistActiveProfile(flash = true) {
+  if (!activeProfile) return;
+  try {
+    await window.store.updateProfile(activeProfile.id, {
+      name: activeProfile.name, bio: activeProfile.bio,
+      documents: activeProfile.documents, repos: activeProfile.repos,
+    });
+    if (flash) savedFlash();
+  } catch (err) {
+    profileStatus.textContent = 'Save failed — check your connection.';
+  }
+}
+
+async function loadProfile() {   // called when the Interview view opens
+  if (profilesLoaded || !window.store || !currentUser) return;
+  try {
+    profiles = await window.store.listProfiles();
+    const savedId = localStorage.getItem('profileId');
+    activeProfile = profiles.find(p => p.id === savedId) || profiles[0];
+    profilesLoaded = true;
+    renderProfileUI();
+  } catch (err) {
+    profileStatus.textContent = 'Could not load profiles — check your connection.';
+  }
+}
+
+function renderProfileUI() {
+  profileSelect.innerHTML = '';
+  profiles.forEach(p => {
+    const opt = document.createElement('option');
+    opt.value = p.id;
+    opt.textContent = p.name;
+    profileSelect.appendChild(opt);
   });
+  if (!activeProfile) return;
+  profileSelect.value = activeProfile.id;
+  localStorage.setItem('profileId', activeProfile.id);
+  profileText.value = activeProfile.bio || '';
+  renderChips();
+  updateProfileSummary();
+}
+
+function updateProfileSummary() {
+  if (!activeProfile) return;
+  const bits = [activeProfile.name];
+  if ((activeProfile.bio || '').trim()) bits.push('bio');
+  const d = (activeProfile.documents || []).length;
+  const r = (activeProfile.repos || []).length;
+  if (d) bits.push(`${d} doc${d > 1 ? 's' : ''}`);
+  if (r) bits.push(`${r} repo${r > 1 ? 's' : ''}`);
+  profileSummary.textContent = bits.join(' · ');
+}
+
+function chip(label, onRemove) {
+  const el = document.createElement('span');
+  el.className = 'chip';
+  el.innerHTML = `<span class="chip-label">${escHtml(label)}</span>`;
+  const x = document.createElement('button');
+  x.className = 'chip-x';
+  x.textContent = '×';
+  x.title = 'Remove';
+  x.addEventListener('click', onRemove);
+  el.appendChild(x);
+  return el;
+}
+
+function renderChips() {
+  docChips.innerHTML = '';
+  (activeProfile.documents || []).forEach((d, i) => {
+    docChips.appendChild(chip(d.note ? `${d.name} — ${d.note}` : d.name, async () => {
+      activeProfile.documents.splice(i, 1);
+      renderChips(); updateProfileSummary();
+      await persistActiveProfile();
+    }));
+  });
+  repoChips.innerHTML = '';
+  (activeProfile.repos || []).forEach((r, i) => {
+    repoChips.appendChild(chip(r.repo, async () => {
+      activeProfile.repos.splice(i, 1);
+      renderChips(); updateProfileSummary();
+      await persistActiveProfile();
+    }));
+  });
+}
+
+profileSelect.addEventListener('change', () => {
+  activeProfile = profiles.find(p => p.id === profileSelect.value) || activeProfile;
+  renderProfileUI();
 });
+
+newProfileBtn.addEventListener('click', async () => {
+  const name = window.prompt('Name for the new profile (e.g. "ML engineer"):');
+  if (!name || !name.trim()) return;
+  const p = await window.store.createProfile(name.trim());
+  profiles.unshift(p);
+  activeProfile = p;
+  renderProfileUI();
+  savedFlash('Profile created ✓');
+});
+
+renameProfileBtn.addEventListener('click', async () => {
+  if (!activeProfile) return;
+  const name = window.prompt('Rename profile:', activeProfile.name);
+  if (!name || !name.trim() || name.trim() === activeProfile.name) return;
+  activeProfile.name = name.trim();
+  renderProfileUI();
+  await persistActiveProfile();
+});
+
+deleteProfileBtn.addEventListener('click', async () => {
+  if (!activeProfile) return;
+  if (!window.confirm(`Delete profile “${activeProfile.name}”? This cannot be undone.`)) return;
+  await window.store.deleteProfile(activeProfile.id);
+  profiles = profiles.filter(p => p.id !== activeProfile.id);
+  if (!profiles.length) profiles = [await window.store.createProfile('Default')];
+  activeProfile = profiles[0];
+  renderProfileUI();
+});
+
+let bioTimer = null;
+profileText.addEventListener('input', () => {
+  if (!activeProfile) return;
+  activeProfile.bio = profileText.value;
+  updateProfileSummary();
+  clearTimeout(bioTimer);
+  bioTimer = setTimeout(() => persistActiveProfile(), 900);
+});
+
+addDocBtn.addEventListener('click', async () => {
+  const file = docFile.files && docFile.files[0];
+  if (!file || !activeProfile) { profileStatus.textContent = 'Choose a file first.'; return; }
+  addDocBtn.disabled = true;
+  profileStatus.textContent = 'Extracting…';
+  try {
+    const form = new FormData();
+    form.append('file', file);
+    form.append('note', docNote.value.trim());
+    const idToken = await window.store.idToken();
+    const res = await fetch(`${apiBase()}/profile/ingest`, {
+      method: 'POST', body: form,
+      headers: idToken ? { 'Authorization': `Bearer ${idToken}` } : {},
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || 'Extraction failed.');
+    const d = await res.json();
+    activeProfile.documents = activeProfile.documents || [];
+    activeProfile.documents.push({ name: d.name, note: d.note, text: d.text });
+    docFile.value = ''; docNote.value = '';
+    renderChips(); updateProfileSummary();
+    await persistActiveProfile();
+  } catch (err) {
+    profileStatus.textContent = err.message;
+  } finally {
+    addDocBtn.disabled = false;
+  }
+});
+
+addRepoBtn.addEventListener('click', async () => {
+  const repo = repoInput.value.trim();
+  if (!repo || !activeProfile) { profileStatus.textContent = 'Enter owner/repo first.'; return; }
+  addRepoBtn.disabled = true;
+  profileStatus.textContent = 'Summarizing repo…';
+  try {
+    const idToken = await window.store.idToken();
+    const res = await fetch(`${apiBase()}/profile/github`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json',
+                 ...(idToken ? { 'Authorization': `Bearer ${idToken}` } : {}) },
+      body: JSON.stringify({ repo }),
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || 'Repo lookup failed.');
+    const r = await res.json();
+    activeProfile.repos = activeProfile.repos || [];
+    activeProfile.repos.push({ repo: r.repo, summary: r.summary });
+    repoInput.value = '';
+    renderChips(); updateProfileSummary();
+    await persistActiveProfile();
+  } catch (err) {
+    profileStatus.textContent = err.message;
+  } finally {
+    addRepoBtn.disabled = false;
+  }
+});
+
+// The one string the hint engine receives — bio, then documents, then repos.
+function compileProfile() {
+  if (!activeProfile) return profileText.value.trim();
+  const parts = [];
+  if ((activeProfile.bio || '').trim()) parts.push(`BIO & NOTES:\n${activeProfile.bio.trim()}`);
+  (activeProfile.documents || []).forEach(d =>
+    parts.push(`DOCUMENT: ${d.name}${d.note ? ` — ${d.note}` : ''}\n${d.text}`));
+  (activeProfile.repos || []).forEach(r =>
+    parts.push(`PROJECT (github ${r.repo}):\n${r.summary}`));
+  return parts.join('\n\n').slice(0, 24000);
+}
+
+// Hint cards fill in three stages: a pending skeleton the moment the server
+// gates a question in, streamed partial bullets as they generate, and the
+// authoritative final card. pendingCards maps seq → card element.
+let pendingCards = {};
+
+function hintCardHtml(hint, meta) {
+  return `<div class="hint-q">${escHtml(hint.gist || 'Question')}<span class="hint-ts">${escHtml(meta)}</span></div>` +
+    (hint.bullets || []).map(b => `<div class="hint-bullet">${escHtml(b)}</div>`).join('') +
+    (hint.angle ? `<div class="hint-angle">${escHtml(hint.angle)}</div>` : '');
+}
+
+function renderHintPending(seq) {
+  const card = document.createElement('div');
+  card.className = 'hint-card hint-thinking';
+  card.innerHTML = '<div class="hint-q">Thinking<span class="hint-dots">…</span></div>';
+  hintsList.prepend(card);  // newest on top — the one you need right now
+  hintsList.scrollTop = 0;  // and make sure the top is what's visible
+  pendingCards[seq] = card;
+}
+
+function renderHintPartial(seq, partial) {
+  const card = pendingCards[seq];
+  if (!card) return;
+  card.innerHTML = hintCardHtml({ gist: partial.gist, bullets: partial.bullets }, '…');
+}
+
+function renderHint(hint, ts, seq) {
+  const card = seq != null ? pendingCards[seq] : null;
+  if (seq != null) delete pendingCards[seq];
+  if (!hint || !hint.is_question) {
+    if (card) card.remove();  // gate said maybe, model said no — clear skeleton
+    return;
+  }
+  const secs = hint.ms ? `${(hint.ms / 1000).toFixed(1)}s` : '';
+  const meta = [ts || '', hint.searched ? 'web' : '', secs].filter(Boolean).join(' · ');
+  if (card) {
+    card.classList.remove('hint-thinking');
+    card.innerHTML = hintCardHtml(hint, meta);
+  } else {
+    const el = document.createElement('div');
+    el.className = 'hint-card';
+    el.innerHTML = hintCardHtml(hint, meta);
+    hintsList.prepend(el);
+    hintsList.scrollTop = 0;
+  }
+}
+
+// Highlights panel (interpret mode): the server folds the meeting into a small
+// markdown doc every couple of minutes. Render **Section** labels and - bullets
+// into safe DOM (no innerHTML from model text); inline **bold** kept as-is text.
+function renderNotes(md, atMs) {
+  notesBody.innerHTML = '';
+  (md || '').split('\n').forEach(raw => {
+    const line = raw.trim();
+    if (!line) return;
+    const section = line.match(/^\*\*(.+?)\*\*:?\s*$/);
+    if (section) {
+      const h = document.createElement('div');
+      h.className = 'notes-section';
+      h.textContent = section[1];
+      notesBody.appendChild(h);
+      return;
+    }
+    const el = document.createElement('div');
+    const bullet = line.match(/^[-*•]\s+(.*)$/);
+    el.className = bullet ? 'notes-bullet' : 'notes-line';
+    el.textContent = (bullet ? bullet[1] : line).replace(/\*\*/g, '');
+    notesBody.appendChild(el);
+  });
+  const when = atMs ? new Date(atMs).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : '';
+  notesStamp.textContent = when ? `Updated ${when}` : '';
+}
+
+function resetNotes() {
+  notesBody.innerHTML = '';
+  notesStamp.textContent = '';
+}
 
 // ── Meeting setup fold ────────────────────────────────────────────────────────
 // The setup form collapses to one line; the summary always shows what a meeting
@@ -155,6 +473,8 @@ function pairHtml(source, english, langTag, notes) {
 function appendChunk({ source, english, langTag, speaker, notes, error, lagMs, ts }) {
   const pinned = isPinned();
   ts = ts || nowStamp();
+  let pairEl = null;
+  let entry = null;
 
   if (error) {
     const div = document.createElement('div');
@@ -163,7 +483,8 @@ function appendChunk({ source, english, langTag, speaker, notes, error, lagMs, t
     output.appendChild(div);
     resetTurnGrouping();
   } else {
-    transcript.push({ ts, speaker: speaker || '', source: source || '', english: english || '' });
+    entry = { ts, speaker: speaker || '', source: source || '', english: english || '' };
+    transcript.push(entry);
     const now = Date.now();
     const canGroup = lastTurn
       && lastTurn.speaker === (speaker || '')
@@ -171,10 +492,10 @@ function appendChunk({ source, english, langTag, speaker, notes, error, lagMs, t
       && lastTurn.pairs < GROUP_MAX_PAIRS;
 
     if (canGroup) {
-      const pair = document.createElement('div');
-      pair.className = 'turn-pair';
-      pair.innerHTML = pairHtml(source, english, langTag, notes);
-      lastTurn.bodyEl.appendChild(pair);
+      pairEl = document.createElement('div');
+      pairEl.className = 'turn-pair';
+      pairEl.innerHTML = pairHtml(source, english, langTag, notes);
+      lastTurn.bodyEl.appendChild(pairEl);
       lastTurn.wallMs = now;
       lastTurn.pairs += 1;
     } else {
@@ -191,6 +512,7 @@ function appendChunk({ source, english, langTag, speaker, notes, error, lagMs, t
       output.appendChild(div);
       lastTurn = { speaker: speaker || '', wallMs: now, pairs: 1,
                    bodyEl: div.querySelector('.turn-body') };
+      pairEl = div.querySelector('.turn-pair');
     }
   }
 
@@ -198,6 +520,26 @@ function appendChunk({ source, english, langTag, speaker, notes, error, lagMs, t
     output.scrollTop = output.scrollHeight;
   } else {
     jumpLatest.classList.remove('hidden');
+  }
+  // Live turns render source first; the translation attaches when it arrives.
+  return { pairEl, entry };
+}
+
+// Live-session registry: utterance id → its rendered pair + transcript entry,
+// so translation.final can attach the English line seconds after the source.
+let uttTurns = {};
+
+function attachTranslation(uttId, english) {
+  const t = uttTurns[uttId];
+  if (!t) return;
+  if (t.entry) t.entry.english = english;
+  if (t.pairEl && !t.pairEl.querySelector('.en')) {
+    const span = document.createElement('span');
+    span.className = 'en';
+    span.textContent = english;
+    const note = t.pairEl.querySelector('.note');
+    t.pairEl.insertBefore(span, note || null);
+    if (isPinned()) output.scrollTop = output.scrollHeight;
   }
 }
 
@@ -241,6 +583,9 @@ clearBtn.addEventListener('click', () => {
   transcript = [];
   resetTurnGrouping();
   jumpLatest.classList.add('hidden');
+  hintsList.innerHTML = '';
+  pendingCards = {};
+  if (!active) hintsPanel.classList.add('hidden');
 });
 
 // ── Saved sessions & history ─────────────────────────────────────────────────
@@ -361,10 +706,17 @@ async function openSession(id) {
     `<strong>${escHtml(sessionName(s))}</strong>${when ? ' · ' + escHtml(when) : ''}` +
     `<span class="viewing-meta">${escHtml(meta)}</span>`;
   viewingStrip.classList.remove('hidden');
+  hintsList.innerHTML = '';
+  pendingCards = {};
   (s.turns || []).forEach(t => {
-    appendChunk({ source: t.source, english: t.english, speaker: t.speaker,
-                  langTag: t.langTag || 'JA', ts: t.ts });
+    if (t.source || t.english) {
+      appendChunk({ source: t.source, english: t.english, speaker: t.speaker,
+                    langTag: t.langTag || 'JA', ts: t.ts });
+    }
+    if (t.hint) renderHint(t.hint, t.ts);
   });
+  hintsPanel.classList.toggle('hidden', !(s.turns || []).some(t => t.hint));
+  notesPanel.classList.add('hidden');   // highlights are live-only, not persisted
   output.scrollTop = 0;
 }
 
@@ -447,6 +799,10 @@ let active = false;
 
 // Voice-activity segmentation: end a chunk on a natural pause instead of a blind
 // timer, so sentences aren't sliced mid-word (the main cause of misheard STT).
+// Interview preset trims the pause wait — a question's hint should start
+// generating ~0.5s after the interviewer stops, not 0.8s.
+let activeVad = null; // set per-session in startConversation
+
 const VAD = {
   POLL_MS: 100,        // how often we sample loudness
   RMS_THRESHOLD: 0.015, // above this = speech
@@ -472,7 +828,171 @@ let dropped = 0;
 let meetingStart = 0;
 let elapsedTimer = null;
 
-startBtn.addEventListener('click', startConversation);
+// Server-owned session + resumable event stream (architecture v2, P1).
+let wsSessionId = null;    // backend LiveSession id
+let streamingSession = false;  // P2: server transcribes a continuous PCM stream
+let workletNode = null;
+let partialEls = {};       // utt_id → live partial-transcript line element
+let lastSeq = 0;           // highest envelope seq seen — reconnects replay from here
+let reconnectAttempts = 0;
+const RECONNECT_MAX = 5;
+
+// P2 streaming capture: an AudioWorklet forwards raw PCM (24kHz mono Int16,
+// ~100ms frames) straight to the session socket. The server-side Realtime API
+// does the voice-activity detection — no MediaRecorder, no chunk boundaries.
+async function startPcmStream() {
+  const code = "class F extends AudioWorkletProcessor{process(i){const c=i[0][0];if(c)this.port.postMessage(c.slice(0));return true;}}registerProcessor('pcm-fwd',F);";
+  const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
+  await audioCtx.audioWorklet.addModule(url);
+  workletNode = new AudioWorkletNode(audioCtx, 'pcm-fwd');
+  audioCtx.createMediaStreamSource(activeStream).connect(workletNode);
+  let buf = new Float32Array(0);
+  workletNode.port.onmessage = (e) => {
+    const merged = new Float32Array(buf.length + e.data.length);
+    merged.set(buf); merged.set(e.data, buf.length);
+    buf = merged;
+    if (buf.length >= 2400) {   // 100ms at 24kHz
+      const pcm = new Int16Array(buf.length);
+      for (let i = 0; i < buf.length; i++) {
+        pcm[i] = Math.max(-32768, Math.min(32767, Math.round(buf[i] * 32767)));
+      }
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(pcm.buffer);
+      buf = new Float32Array(0);
+    }
+  };
+}
+
+function connectSessionWs() {
+  const wsUrl = apiBase().replace(/^http/, 'ws')
+    + `/ws/conversation?session_id=${encodeURIComponent(wsSessionId)}&last_seq=${lastSeq}`;
+  ws = new WebSocket(wsUrl);
+
+  ws.onopen = async () => {
+    const idToken = window.store ? await window.store.idToken() : '';
+    ws.send(JSON.stringify({ op: 'start', id_token: idToken }));
+    reconnectAttempts = 0;
+    inFlight = false;   // any chunk that was in flight during the drop is gone
+    setStatus();
+    trySend();
+  };
+
+  ws.onmessage = (evt) => {
+    const env = JSON.parse(evt.data);
+    if (env.seq) lastSeq = Math.max(lastSeq, env.seq);
+    handleSessionEvent(env);
+  };
+
+  ws.onclose = (evt) => {
+    if (evt.code === 4401) {
+      appendChunk({ error: 'Session expired — sign in again to continue.' });
+      if (active) stopConversation();
+      return;
+    }
+    if (evt.code === 4404) {
+      appendChunk({ error: 'Session ended on the server — press Start to begin a new one.' });
+      if (active) stopConversation();
+      return;
+    }
+    if (active && wsSessionId && reconnectAttempts < RECONNECT_MAX) {
+      reconnectAttempts += 1;
+      convStatus.textContent = `Reconnecting… (${reconnectAttempts})`;
+      setTimeout(() => { if (active) connectSessionWs(); }, 1000 * reconnectAttempts);
+    } else if (active) {
+      appendChunk({ error: 'Connection lost — press Start to begin a new session.' });
+      stopConversation();
+    }
+  };
+
+  ws.onerror = () => { /* onclose handles recovery */ };
+}
+
+function handleSessionEvent(env) {
+  const d = env.data || {};
+  switch (env.type) {
+    case 'transcript.partial': {
+      let el = partialEls[d.utt_id];
+      if (!el) {
+        el = document.createElement('div');
+        el.className = 'turn-partial';
+        output.appendChild(el);
+        partialEls[d.utt_id] = el;
+      }
+      el.textContent = d.text;
+      if (isPinned()) output.scrollTop = output.scrollHeight;
+      break;
+    }
+    case 'transcript.final': {
+      if (partialEls[d.utt_id]) {
+        partialEls[d.utt_id].remove();
+        delete partialEls[d.utt_id];
+      }
+      const rendered = appendChunk({
+        source: d.text, english: '', speaker: d.speaker,
+        langTag: (d.lang || sourceLang.value).toUpperCase(),
+      });
+      uttTurns[d.utt_id] = rendered;
+      if (currentMode === 'interview') {
+        saveTurn(liveSessionId, {
+          seq: transcript.length, ts: nowStamp(), speaker: d.speaker || '',
+          source: d.text, english: '', langTag: (d.lang || 'en').toUpperCase(),
+          first: transcript.length === 1,
+        });
+      }
+      break;
+    }
+    case 'translation.final': {
+      attachTranslation(d.utt_id, d.english);
+      const t = uttTurns[d.utt_id];
+      saveTurn(liveSessionId, {
+        seq: transcript.length, ts: nowStamp(),
+        speaker: (t && t.entry && t.entry.speaker) || '',
+        source: (t && t.entry && t.entry.source) || '',
+        english: d.english, langTag: sourceLang.value.toUpperCase(),
+        first: transcript.length === 1,
+      });
+      break;
+    }
+    case 'hint.pending':
+      renderHintPending(d.utt_id);
+      break;
+    case 'hint.partial':
+      renderHintPartial(d.utt_id, d);
+      break;
+    case 'hint.final': {
+      const hint = { is_question: d.is_question, gist: d.gist, bullets: d.bullets,
+                     angle: d.angle, searched: d.searched, ms: d.ms };
+      renderHint(hint, nowStamp(), d.utt_id);
+      if (hint.is_question) {
+        saveTurn(liveSessionId, {
+          seq: transcript.length, ts: nowStamp(), speaker: '',
+          source: '', english: '', hint,
+        });
+      }
+      break;
+    }
+    case 'chunk.ack':
+      // Transitional (P1): the capture loop sends one chunk at a time and
+      // waits for this before releasing the next. Removed in P2.
+      inFlight = false;
+      setStatus();
+      trySend();
+      break;
+    case 'notes.updated':
+      renderNotes(d.notes, d.at ? d.at * 1000 : Date.now());
+      break;
+    case 'session.status':
+      if (d.state === 'resumed') convStatus.textContent = 'Reconnected';
+      break;
+    case 'error':
+      appendChunk({ error: d.message });
+      break;
+    default:
+      break;  // forward compatibility: ignore unknown event types
+  }
+}
+
+startBtn.addEventListener('click', () => startConversation('interpret'));
+startInterviewBtn.addEventListener('click', () => startConversation('interview'));
 stopBtn.addEventListener('click', stopConversation);
 
 function setStatus() {
@@ -500,93 +1020,125 @@ function trySend() {
   setStatus();
 }
 
-async function startConversation() {
-  prepStatus.textContent = '';
+let micStream = null;
+let displayStream = null;
+
+async function startConversation(mode) {
+  currentMode = mode || 'interpret';
+  // Interview trims the pause wait and the max turn length — speed over accuracy.
+  activeVad = currentMode === 'interview'
+    ? { ...VAD, SILENCE_MS: 500, MAX_MS: 10000 }
+    : { ...VAD };
+  const statusEl = currentMode === 'interview' ? prepInterviewStatus : prepStatus;
+  statusEl.textContent = '';
   try {
-    activeStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
   } catch (err) {
-    prepStatus.textContent = 'Microphone access was denied — allow the mic and try again.';
+    statusEl.textContent = 'Microphone access was denied — allow the mic and try again.';
     return;
+  }
+
+  // 24kHz context serves all paths: VAD metering, tab+mic mixing, and the
+  // streaming-ASR PCM pipeline (which requires this exact rate).
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+
+  // Interview mode: the interviewer usually comes through headphones, which the
+  // mic never hears — mix in the meeting tab's audio via screen-share capture.
+  activeStream = micStream;
+  if (currentMode === 'interview' && captureTabEl.checked) {
+    try {
+      displayStream = await navigator.mediaDevices.getDisplayMedia({
+        video: true, audio: true,
+      });
+      if (displayStream.getAudioTracks().length) {
+        const dest = audioCtx.createMediaStreamDestination();
+        audioCtx.createMediaStreamSource(micStream).connect(dest);
+        audioCtx.createMediaStreamSource(displayStream).connect(dest);
+        activeStream = dest.stream;
+      } else {
+        statusEl.textContent = 'That window has no audio — pick a tab and tick "share tab audio". Using mic only.';
+      }
+    } catch (err) {
+      statusEl.textContent = 'Tab capture declined — using mic only.';
+    }
   }
 
   // Loudness meter for pause detection. The analyser only reads the signal — it
   // is not connected to the destination, so there's no audio feedback.
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   const src = audioCtx.createMediaStreamSource(activeStream);
   analyser = audioCtx.createAnalyser();
   analyser.fftSize = 1024;
   vadBuf = new Uint8Array(analyser.fftSize);
   src.connect(analyser);
 
+  // Interview mode is self-contained: English, Sonnet, and its own fields
+  // (role/company + names & terms + profile) — Meeting setup does not apply.
+  const isInterview = currentMode === 'interview';
+  const langCode = isInterview ? 'en' : sourceLang.value;
+  const langName = isInterview ? 'English' : sourceLang.options[sourceLang.selectedIndex].text;
+  const sessionModel = isInterview ? 'sonnet' : modelSel.value;
+  const sessionContext = isInterview ? interviewRole.value.trim() : contextInput.value.trim();
+  const sessionGlossary = isInterview ? interviewTerms.value.trim() : glossaryEl.value.trim();
+  const sessionParticipants = isInterview ? '' : participantsEl.value.trim();
+  const sessionDiarize = isInterview ? true : diarizeEl.checked;
+
   // Session doc + ID token before the socket opens (login is required).
   // The full setup is saved with the meeting so history shows how it was run.
   const idToken = window.store ? await window.store.idToken() : '';
   if (window.store) {
     liveSessionId = await window.store.startSession({
-      langName: sourceLang.options[sourceLang.selectedIndex].text,
-      sourceLang: sourceLang.value,
-      model: modelSel.value,
-      context: contextInput.value.trim(),
-      glossary: glossaryEl.value.trim(),
-      participants: participantsEl.value.trim(),
-      diarize: diarizeEl.checked,
+      mode: currentMode,
+      langName,
+      sourceLang: langCode,
+      model: sessionModel,
+      context: sessionContext,
+      glossary: sessionGlossary,
+      participants: sessionParticipants,
+      diarize: sessionDiarize,
     });
   }
   viewingHistory = false;
   viewingStrip.classList.add('hidden');
 
-  const wsUrl = apiBase().replace(/^http/, 'ws') + '/ws/conversation';
-  ws = new WebSocket(wsUrl);
-
-  ws.onopen = () => {
-    ws.send(JSON.stringify({
-      model: modelSel.value,
-      source_lang: sourceLang.value,
-      lang_name: sourceLang.options[sourceLang.selectedIndex].text,
-      context: contextInput.value.trim(),
-      glossary: glossaryEl.value.trim(),
-      participants: participantsEl.value.trim(),
-      diarize: diarizeEl.checked,
-      id_token: idToken,
-    }));
-  };
-
-  ws.onmessage = (evt) => {
-    const msg = JSON.parse(evt.data);
-    // Every server reply (including skips) clears the in-flight slot so the
-    // next pending chunk can go out.
-    inFlight = false;
-    const lagMs = sentAt ? Date.now() - sentAt : null;
-
-    if (msg.error) {
-      appendChunk({ error: msg.error });
-    } else if (!msg.skipped) {
-      appendChunk({
-        source: msg.source,
-        english: msg.english,
-        speaker: msg.speaker,
-        langTag: sourceLang.value.toUpperCase(),
-        lagMs,
-      });
-      saveTurn(liveSessionId, {
-        seq: transcript.length, ts: nowStamp(), speaker: msg.speaker || '',
-        source: msg.source, english: msg.english,
-        langTag: sourceLang.value.toUpperCase(), first: transcript.length === 1,
-      });
-    }
-    setStatus();
-    trySend();
-  };
-
-  ws.onerror = () => {
-    appendChunk({ error: 'Connection lost — press “Start meeting” to reconnect.' });
-  };
-  ws.onclose = (evt) => {
-    if (evt.code === 4401) {
-      appendChunk({ error: 'Session expired — sign in again to continue.' });
-    }
-    if (active) stopConversation();
-  };
+  // Create the server-owned session over REST, then attach the WebSocket to
+  // it. A dropped connection re-attaches with last_seq and replays anything
+  // missed — the session (transcript, brief, summary) lives on the server.
+  let sessionRes;
+  try {
+    sessionRes = await fetch(`${apiBase()}/session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json',
+                 ...(idToken ? { 'Authorization': `Bearer ${idToken}` } : {}) },
+      body: JSON.stringify({
+        mode: currentMode,
+        profile: isInterview ? compileProfile() : '',
+        model: sessionModel,
+        source_lang: langCode,
+        lang_name: langName,
+        context: sessionContext,
+        glossary: sessionGlossary,
+        participants: sessionParticipants,
+        diarize: sessionDiarize,
+      }),
+    });
+    if (!sessionRes.ok) throw new Error(`session create failed (${sessionRes.status})`);
+  } catch (err) {
+    statusEl.textContent = 'Could not reach the backend — check the connection and try again.';
+    [micStream, displayStream].forEach(st => st && st.getTracks().forEach(t => t.stop()));
+    micStream = displayStream = null;
+    if (audioCtx) { audioCtx.close(); audioCtx = null; }
+    return;
+  }
+  const sessionInfo = await sessionRes.json();
+  wsSessionId = sessionInfo.session_id;
+  streamingSession = !!sessionInfo.streaming;
+  lastSeq = 0;
+  reconnectAttempts = 0;
+  uttTurns = {};
+  partialEls = {};
+  connectSessionWs();
 
   active = true;
   inFlight = false;
@@ -597,18 +1149,38 @@ async function startConversation() {
   stopBtn.disabled = false;
 
   // Live view: setup collapses to the status bar, transcript becomes the hero.
-  const langName = sourceLang.options[sourceLang.selectedIndex].text;
   const modelName = modelSel.options[modelSel.selectedIndex].text.split(' ')[0];
-  liveMeta.textContent = `${langName} → English · ${modelName}`;
+  liveMeta.textContent = isInterview
+    ? `Interview copilot${sessionContext ? ' · ' + sessionContext : ''}`
+    : `${langName} → English · ${modelName}`;
+  if (isInterview) {
+    hintsList.innerHTML = '';
+  pendingCards = {};
+    hintsPanel.classList.remove('hidden');
+    notesPanel.classList.add('hidden');
+    document.body.classList.add('interview');
+  } else {
+    hintsPanel.classList.add('hidden');
+    resetNotes();
+    notesPanel.classList.remove('hidden');
+    document.body.classList.remove('interview');
+  }
   document.body.classList.add('live');
   meetingStart = Date.now();
   tickElapsed();
   elapsedTimer = setInterval(tickElapsed, 1000);
   setStatus();
 
-  // Cycle stop/start so each recording is a complete, self-contained WebM file.
-  // Using timeslice produces headerless continuation chunks that Whisper rejects.
-  recordCycle();
+  if (streamingSession) {
+    // P2 streaming: continuous PCM to the server; the Realtime API's VAD
+    // segments utterances. No MediaRecorder, no chunk cycle, no backpressure.
+    convStatus.textContent = 'Listening…';
+    startPcmStream();
+  } else {
+    // Cycle stop/start so each recording is a complete, self-contained WebM
+    // file. Using timeslice produces headerless chunks that Whisper rejects.
+    recordCycle();
+  }
 }
 
 // Root-mean-square loudness of the current mic frame, 0..~1.
@@ -649,17 +1221,17 @@ function recordCycle() {
   // Cut the recording on a sustained pause after speech, or at the hard cap.
   const monitor = setInterval(() => {
     if (rec.state !== 'recording') return;
-    elapsed += VAD.POLL_MS;
-    if (currentRms() >= VAD.RMS_THRESHOLD) {
+    elapsed += activeVad.POLL_MS;
+    if (currentRms() >= activeVad.RMS_THRESHOLD) {
       sawSpeech = true;
-      speechMs += VAD.POLL_MS;
+      speechMs += activeVad.POLL_MS;
       silenceMs = 0;
     } else {
-      silenceMs += VAD.POLL_MS;
+      silenceMs += activeVad.POLL_MS;
     }
-    const pauseEnded = sawSpeech && speechMs >= VAD.MIN_SPEECH_MS && silenceMs >= VAD.SILENCE_MS;
-    if (pauseEnded || elapsed >= VAD.MAX_MS) rec.stop();
-  }, VAD.POLL_MS);
+    const pauseEnded = sawSpeech && speechMs >= activeVad.MIN_SPEECH_MS && silenceMs >= activeVad.SILENCE_MS;
+    if (pauseEnded || elapsed >= activeVad.MAX_MS) rec.stop();
+  }, activeVad.POLL_MS);
 
   rec.start();
 }
@@ -670,14 +1242,19 @@ function stopConversation() {
     window.store.endSession(liveSessionId, transcript.length);
     liveSessionId = '';
   }
-  if (activeStream) {
-    activeStream.getTracks().forEach(t => t.stop());
-    activeStream = null;
-  }
+  [activeStream, micStream, displayStream].forEach(s => {
+    if (s) s.getTracks().forEach(t => t.stop());
+  });
+  activeStream = micStream = displayStream = null;
+  if (workletNode) { try { workletNode.disconnect(); } catch (e) {} workletNode = null; }
+  partialEls = {};
+  streamingSession = false;
   if (audioCtx) { audioCtx.close(); audioCtx = null; analyser = null; vadBuf = null; }
+  wsSessionId = null;   // before close, so onclose doesn't try to reconnect
   if (ws) { ws.close(); ws = null; }
   if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
   document.body.classList.remove('live');
+  notesPanel.classList.add('hidden');
   startBtn.disabled = false;
   stopBtn.disabled = true;
   convStatus.textContent = '';

@@ -149,11 +149,53 @@ body.live .status-bar { display: flex; }
   font-size: 0.78rem;
 }
 
-/* ── Setup (Prepare view) ───────────────────────────────────────────────── */
+/* ── Setup (Prepare views) ──────────────────────────────────────────────── */
 
 body.live .setup { display: none; }
+body.view-home .workspace { display: none; }  /* home shows only the cards */
 
 .setup { display: flex; flex-direction: column; gap: 0; }
+
+.view { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
+.view .setup-card { width: 100%; border-radius: 4px; }
+
+/* Home: mode cards */
+.mode-cards {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px;
+  padding-top: 8px;
+}
+
+.mode-card {
+  background: var(--paper2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: var(--sans);
+  color: var(--sumi);
+  text-align: left;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 130px;
+}
+
+.mode-card:hover:not(:disabled) { border-color: var(--ai); }
+.mode-card strong { font-size: 1.02rem; }
+.mode-kanji {
+  font-family: var(--display);
+  font-weight: 600;
+  color: var(--ai);
+  font-size: 1.15rem;
+  letter-spacing: 0.08em;
+}
+.mode-desc { color: var(--nezumi); font-size: 0.85rem; line-height: 1.45; }
+.mode-disabled { opacity: 0.45; cursor: default; }
+
+.back-home { align-self: flex-start; }
 
 .tabs { display: flex; gap: 2px; }
 
@@ -337,6 +379,142 @@ textarea { resize: vertical; }
 }
 .btn-small:hover { color: var(--sumi); border-color: var(--nezumi); }
 
+/* ── Workspace: transcript + (interview) hint cards ─────────────────────── */
+
+.workspace {
+  flex: 1;
+  display: flex;
+  gap: 20px;
+  min-height: 200px;
+}
+
+.hints-panel {
+  flex: 0 0 320px;
+  display: flex;
+  flex-direction: column;
+}
+
+.hints-list {
+  flex: 1;
+  overflow-y: auto;
+  padding-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.hints-list:empty::before {
+  content: 'Answer hints appear here when the interviewer asks something.';
+  color: var(--nezumi);
+  font-style: italic;
+  font-size: 0.85rem;
+}
+
+.hint-card {
+  background: var(--paper2);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--ai);
+  border-radius: 4px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.hint-q {
+  font-weight: 600;
+  font-size: 0.92rem;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.hint-ts { font-family: var(--mono); font-size: 0.72rem; font-weight: 400; color: var(--nezumi); }
+
+.hint-bullet {
+  font-size: 0.98rem;   /* glanceable while speaking */
+  line-height: 1.4;
+  padding-left: 14px;
+  text-indent: -14px;
+}
+
+.hint-bullet::before { content: '– '; color: var(--ai); }
+
+.hint-angle {
+  color: var(--nezumi);
+  font-size: 0.8rem;
+  font-style: italic;
+  border-top: 1px solid var(--line);
+  padding-top: 6px;
+}
+
+/* Skeleton card shown the instant a question is detected, before bullets land. */
+.hint-thinking .hint-q { color: var(--nezumi); font-weight: 500; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .hint-thinking { animation: hint-pulse 1.2s ease-in-out infinite; }
+}
+
+@keyframes hint-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+/* ── Highlights panel (interpret mode) ──────────────────────────────────── */
+
+.notes-panel {
+  flex: 0 0 300px;
+  display: flex;
+  flex-direction: column;
+}
+
+.notes-stamp {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--nezumi);
+}
+
+.notes-body {
+  flex: 1;
+  overflow-y: auto;
+  padding-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.notes-body:empty::before {
+  content: 'Highlights of the meeting build here, refreshed every couple of minutes.';
+  color: var(--nezumi);
+  font-style: italic;
+  font-size: 0.85rem;
+}
+
+.notes-section {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--ai);
+  margin-top: 8px;
+}
+.notes-section:first-child { margin-top: 0; }
+
+.notes-bullet {
+  font-size: 0.92rem;
+  line-height: 1.42;
+  padding-left: 14px;
+  text-indent: -14px;
+}
+.notes-bullet::before { content: '– '; color: var(--ai); }
+
+.notes-line { font-size: 0.92rem; line-height: 1.42; }
+
+@media (max-width: 780px) {
+  .workspace { flex-direction: column; }
+  .hints-panel, .notes-panel { flex: none; max-height: 40vh; }
+}
+
 /* ── Transcript ─────────────────────────────────────────────────────────── */
 
 .transcript-section {
@@ -345,6 +523,7 @@ textarea { resize: vertical; }
   flex-direction: column;
   min-height: 200px;
   position: relative;
+  min-width: 0;
 }
 
 .transcript-header {
@@ -375,13 +554,28 @@ textarea { resize: vertical; }
 }
 
 body:not(.live) .transcript { max-height: 40vh; }
-body.live .transcript { max-height: none; }
+
+/* Live: both panes are pinned to the viewport and scroll INTERNALLY — the
+   page itself never scrolls, so the transcript auto-follows at its bottom
+   while the newest hint card stays visible at the panel's top. */
+body.live .transcript { max-height: calc(100vh - 230px); }
+body.live .hints-panel,
+body.live .notes-panel { position: sticky; top: 60px; align-self: flex-start; }
+body.live .hints-list,
+body.live .notes-body { max-height: calc(100vh - 270px); overflow-y: auto; }
 
 .transcript:empty::before {
   content: 'Press “Start meeting” — the mic listens and segments on natural pauses.';
   color: var(--nezumi);
   font-style: italic;
   padding-top: 8px;
+}
+
+/* Live partial transcript (streaming ASR): grey, updating in place. */
+.turn-partial {
+  color: var(--nezumi);
+  font-style: italic;
+  padding-left: 15px;
 }
 
 /* Turn anatomy: meta line, then JA/EN hanging from a speaker-colored rail */
@@ -543,6 +737,68 @@ body.signed-out .status-bar { display: none; }
   font-size: 0.88rem;
   padding: 4px 8px;
 }
+
+/* ── Interview profiles: picker, sections, chips ────────────────────────── */
+
+.profile-picker {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.profile-picker select { flex: 0 1 220px; width: auto; }
+
+.profile-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.profile-section-title {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--nezumi);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.profile-section .btn-row input[type="text"] { flex: 1; min-width: 160px; }
+.file-input { flex: 0 1 240px; font-size: 0.82rem; color: var(--nezumi); }
+
+.chip-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip-list:empty::before { content: 'None yet.'; color: var(--nezumi); font-size: 0.82rem; font-style: italic; }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--washi);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 0.82rem;
+  padding: 3px 6px 3px 12px;
+  max-width: 100%;
+}
+
+.chip-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 340px; }
+
+.chip-x {
+  background: none;
+  border: none;
+  color: var(--nezumi);
+  cursor: pointer;
+  font-size: 0.95rem;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 50%;
+}
+
+.chip-x:hover { color: var(--shu); }
 
 .history-when {
   font-family: var(--mono);

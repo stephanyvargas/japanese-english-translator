@@ -7,7 +7,7 @@ from openai import OpenAI
 
 from .analyzer import analyze
 from .audio import AudioCapture, record_from_mic, stream_chunks
-from .models import FinalOutput
+from .models import FinalOutput, thinking_kwargs
 from .reviewer import review
 from .transcriber import transcribe
 from .translator import translate
@@ -230,7 +230,7 @@ def _translate_with_context(
     with client.messages.stream(
         model=model,
         max_tokens=2048,
-        thinking={"type": "adaptive"},
+        **thinking_kwargs(model),
         system=_conversation_system_blocks(lang_name, context, glossary, participants, diarized),
         messages=[{"role": "user", "content": user_msg}],
     ) as stream:
@@ -290,6 +290,56 @@ def _summarize_history(
     ) as stream:
         msg = stream.get_final_message()
     return _text_of(msg) or prev_summary
+
+
+_HIGHLIGHTS_MODEL = "claude-haiku-4-5"
+
+_HIGHLIGHTS_SYSTEM = """\
+You keep a live "highlights" panel for someone sitting in a meeting, refreshed
+every couple of minutes. You are given the highlights so far (may be empty) and
+the new translated transcript lines since the last refresh. Fold the new lines
+into the highlights and return the FULL updated panel.
+
+Write for a reader skimming mid-meeting — plain English, concrete, no filler.
+Use only the markdown sections that actually apply, each with short bullets:
+
+**Topics** — what's being discussed
+**Decisions** — anything agreed or concluded
+**Action items** — who owes what (name the person when a [speaker tag] makes it clear)
+**Open questions** — unresolved points raised
+
+Keep the whole panel tight (about 8 bullets max) and reflect the latest state —
+drop points that were superseded. Speaker tags appear in [brackets] when known.
+Output ONLY the updated highlights markdown, no preamble or commentary.\
+"""
+
+
+def summarize_highlights(
+    new_lines: list[str],
+    prev_notes: str,
+    client: anthropic.Anthropic,
+    model: str = _HIGHLIGHTS_MODEL,
+) -> str:
+    """Fold newly translated lines into a running, reader-facing highlights panel.
+
+    Distinct from `_summarize_history` (which maintains the interpreter's own
+    translation context): this is what the user reads. Cheap (haiku), called on
+    a timer off the hot path. Returns the previous panel unchanged on empty input
+    or empty output.
+    """
+    if not new_lines:
+        return prev_notes
+    prev_block = (f"Highlights so far:\n{prev_notes}\n\n" if prev_notes
+                  else "Highlights so far: (none yet)\n\n")
+    user_msg = prev_block + "New transcript lines since last refresh:\n" + "\n".join(new_lines)
+    with client.messages.stream(
+        model=model,
+        max_tokens=1024,
+        system=_HIGHLIGHTS_SYSTEM,
+        messages=[{"role": "user", "content": user_msg}],
+    ) as stream:
+        msg = stream.get_final_message()
+    return _text_of(msg) or prev_notes
 
 
 def run_conversation(

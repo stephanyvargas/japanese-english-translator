@@ -9,7 +9,7 @@
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+JP:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=Shippori+Mincho:wght@600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="style.css" />
 </head>
-<body>
+<body class="view-home">
   <div class="app">
 
     <header class="masthead">
@@ -42,15 +42,45 @@
       <button id="stopBtn" class="btn btn-end" disabled>End meeting</button>
     </div>
 
-    <!-- Prepare view -->
+    <!-- Prepare area: home (mode picker) + one dedicated view per mode -->
     <section id="setup" class="setup">
-      <div class="tabs" role="tablist">
-        <button class="tab active" data-tab="conversation" role="tab">Live meeting</button>
-        <button class="tab" data-tab="text" role="tab">Type text</button>
-        <button class="tab" data-tab="history" role="tab">History</button>
+
+      <!-- Home: pick what you're doing -->
+      <div class="view" id="view-home">
+        <div class="mode-cards">
+          <button class="mode-card" data-view="interpret">
+            <span class="mode-kanji" lang="ja">通訳</span>
+            <strong>Live meeting</strong>
+            <span class="mode-desc">Japanese → English as people speak — speaker labels, saved minutes.</span>
+          </button>
+          <button class="mode-card" data-view="interview">
+            <span class="mode-kanji" lang="ja">面接</span>
+            <strong>Interview copilot</strong>
+            <span class="mode-desc">Glanceable answer hints grounded in your CV. English interviews.</span>
+          </button>
+          <button class="mode-card" data-view="text">
+            <span class="mode-kanji" lang="ja">翻訳</span>
+            <strong>Typed text</strong>
+            <span class="mode-desc">Paste text, get the full quality pipeline: analyze → translate → review.</span>
+          </button>
+          <button class="mode-card" data-view="history">
+            <span class="mode-kanji" lang="ja">記録</span>
+            <strong>History</strong>
+            <span class="mode-desc">Reopen, rename, or copy past meetings and interviews.</span>
+          </button>
+          <button class="mode-card mode-disabled" disabled>
+            <span class="mode-kanji" lang="ja">議事録</span>
+            <strong>Meeting notes</strong>
+            <span class="mode-desc">Summary, decisions, action points — coming soon.</span>
+          </button>
+        </div>
       </div>
 
-      <div class="setup-card">
+      <!-- Live meeting (interpreter) -->
+      <div class="view hidden" id="view-interpret">
+        <button class="back-home btn btn-small">← Home</button>
+        <div class="setup-card">
+        <div class="setup-slot"></div>
         <details id="setupFold" class="setup-fold">
           <summary>Meeting setup <span id="setupSummary" class="hint"></span></summary>
         <div class="control-row">
@@ -120,9 +150,15 @@
             <span id="prepStatus" class="status-detail"></span>
           </div>
         </div>
+        </div>
+      </div>
 
-        <!-- Text panel -->
-        <div class="panel hidden" id="panel-text">
+      <!-- Typed text -->
+      <div class="view hidden" id="view-text">
+        <button class="back-home btn btn-small">← Home</button>
+        <div class="setup-card">
+        <div class="setup-slot"></div>
+        <div class="panel" id="panel-text">
           <textarea id="textInput" rows="4" placeholder="Paste or type text to translate…"></textarea>
           <div class="btn-row">
             <button id="translateBtn" class="btn btn-primary">Translate</button>
@@ -132,9 +168,80 @@
             <span id="textStatus" class="status-detail"></span>
           </div>
         </div>
+        </div>
+      </div>
 
-        <!-- History panel -->
-        <div class="panel hidden" id="panel-history">
+      <!-- Interview copilot (self-contained — no shared meeting setup) -->
+      <div class="view hidden" id="view-interview">
+        <button class="back-home btn btn-small">← Home</button>
+        <div class="setup-card">
+        <div class="panel" id="panel-interview">
+          <div class="control-row">
+            <label class="full-width">
+              Role &amp; company <span class="hint">(steers the hints and any web lookups)</span>
+              <input type="text" id="interviewRole" placeholder="e.g. ML engineer at Acme Robotics" />
+            </label>
+          </div>
+          <div class="control-row">
+            <label class="full-width">
+              Names &amp; terms <span class="hint">(helps recognition — interviewer, company, products)</span>
+              <input type="text" id="interviewTerms" placeholder="e.g. Datadog, Kubernetes, Priya" />
+            </label>
+          </div>
+          <details class="control-details" id="profileFold" open>
+            <summary>My profile <span id="profileSummary" class="hint">(grounds the answer hints — saved to your account)</span></summary>
+
+            <div class="profile-picker">
+              <select id="profileSelect" aria-label="Profile"></select>
+              <button id="newProfileBtn" class="btn btn-small">New</button>
+              <button id="renameProfileBtn" class="btn btn-small">Rename</button>
+              <button id="deleteProfileBtn" class="btn btn-small">Delete</button>
+              <span id="profileStatus" class="status-detail"></span>
+            </div>
+
+            <label class="full-width">
+              Bio &amp; notes
+              <textarea id="profileText" rows="6"
+                placeholder="A short bio, key experience, anything you want the hints to draw on."></textarea>
+            </label>
+
+            <div class="profile-section">
+              <span class="profile-section-title">Documents <span class="hint">(PDF / text / markdown — extracted into the profile)</span></span>
+              <div id="docChips" class="chip-list"></div>
+              <div class="btn-row">
+                <input type="file" id="docFile" accept=".pdf,.txt,.md,.markdown" class="file-input" />
+                <input type="text" id="docNote" placeholder="What is this? e.g. 2024 resume" />
+                <button id="addDocBtn" class="btn btn-small">Add document</button>
+              </div>
+            </div>
+
+            <div class="profile-section">
+              <span class="profile-section-title">GitHub projects <span class="hint">(public repos — summarized into the profile)</span></span>
+              <div id="repoChips" class="chip-list"></div>
+              <div class="btn-row">
+                <input type="text" id="repoInput" placeholder="owner/repo, e.g. stephanyvargas/japanese-english-translator" />
+                <button id="addRepoBtn" class="btn btn-small">Add repo</button>
+              </div>
+            </div>
+          </details>
+          <label class="checkbox-label">
+            <input type="checkbox" id="captureTab" checked />
+            Capture meeting-tab audio (pick the interview tab when prompted — needed when the interviewer is in your headphones)
+          </label>
+          <p class="hint">Interviews run in English. The company is pre-researched when you press Start,
+            so most questions answer from your profile + that brief in a couple of seconds.</p>
+          <div class="btn-row">
+            <button id="startInterviewBtn" class="btn btn-primary">● Start interview</button>
+            <span id="prepInterviewStatus" class="status-detail"></span>
+          </div>
+        </div>
+        </div>
+      </div>
+
+      <!-- History -->
+      <div class="view hidden" id="view-history">
+        <button class="back-home btn btn-small">← Home</button>
+        <div class="setup-card">
           <div id="historyList" class="history-list">
             <p class="hint">Loading your meetings…</p>
           </div>
@@ -148,18 +255,33 @@
       <button id="viewingBack" class="btn btn-small">Back</button>
     </div>
 
-    <!-- Transcript -->
-    <section class="transcript-section">
-      <div class="transcript-header">
-        <span class="transcript-title">Transcript</span>
-        <span class="transcript-actions">
-          <button id="copyBtn" class="btn btn-small">Copy minutes</button>
-          <button id="clearBtn" class="btn btn-small">Clear</button>
-        </span>
-      </div>
-      <div id="output" class="transcript" tabindex="0"></div>
-      <button id="jumpLatest" class="jump-latest hidden">↓ Jump to latest</button>
-    </section>
+    <!-- Workspace: transcript + (interview mode) hint cards -->
+    <div class="workspace">
+      <section class="transcript-section">
+        <div class="transcript-header">
+          <span class="transcript-title">Transcript</span>
+          <span class="transcript-actions">
+            <button id="copyBtn" class="btn btn-small">Copy minutes</button>
+            <button id="clearBtn" class="btn btn-small">Clear</button>
+          </span>
+        </div>
+        <div id="output" class="transcript" tabindex="0"></div>
+        <button id="jumpLatest" class="jump-latest hidden">↓ Jump to latest</button>
+      </section>
+
+      <aside id="hintsPanel" class="hints-panel hidden" aria-label="Answer hints">
+        <div class="transcript-header"><span class="transcript-title">Answer hints</span></div>
+        <div id="hintsList" class="hints-list"></div>
+      </aside>
+
+      <aside id="notesPanel" class="notes-panel hidden" aria-label="Session highlights">
+        <div class="transcript-header">
+          <span class="transcript-title">Highlights</span>
+          <span id="notesStamp" class="notes-stamp"></span>
+        </div>
+        <div id="notesBody" class="notes-body"></div>
+      </aside>
+    </div>
 
   </div>
 
