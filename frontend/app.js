@@ -797,6 +797,35 @@ let activeStream = null;
 let ws = null;
 let active = false;
 
+// Screen wake lock: an hour-long meeting must survive the device's auto-sleep —
+// a locked screen suspends the tab's audio pipeline (no capture, no output).
+// The browser drops the lock whenever the tab is hidden, so the visibilitychange
+// listener below re-acquires it while a session is live.
+let wakeLock = null;
+
+async function acquireWakeLock() {
+  if (!('wakeLock' in navigator)) {
+    convStatus.textContent = 'This browser can’t keep the screen awake — disable auto-sleep for long meetings.';
+    return;
+  }
+  try {
+    wakeLock = await navigator.wakeLock.request('screen');
+    wakeLock.addEventListener('release', () => { wakeLock = null; });
+  } catch (err) {
+    // Battery saver or low power mode can reject the request — the session
+    // still works; the device just sleeps on its normal schedule.
+    console.warn('wake lock unavailable:', err.message);
+  }
+}
+
+function releaseWakeLock() {
+  if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && active && !wakeLock) acquireWakeLock();
+});
+
 // Voice-activity segmentation: end a chunk on a natural pause instead of a blind
 // timer, so sentences aren't sliced mid-word (the main cause of misheard STT).
 // Interview preset trims the pause wait — a question's hint should start
@@ -1154,6 +1183,7 @@ async function startConversation(mode) {
   connectSessionWs();
 
   active = true;
+  acquireWakeLock();   // keep the device awake for the whole session
   inFlight = false;
   pendingChunk = null;
   dropped = 0;
@@ -1251,6 +1281,7 @@ function recordCycle() {
 
 function stopConversation() {
   active = false;
+  releaseWakeLock();   // let the device sleep on its normal schedule again
   if (window.store && liveSessionId) {
     window.store.endSession(liveSessionId, transcript.length);
     liveSessionId = '';
