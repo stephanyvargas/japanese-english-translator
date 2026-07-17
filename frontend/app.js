@@ -1043,6 +1043,19 @@ async function startConversation(mode) {
   // 24kHz context serves all paths: VAD metering, tab+mic mixing, and the
   // streaming-ASR PCM pipeline (which requires this exact rate).
   audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+  // A forced non-native rate often starts the context suspended (autoplay
+  // policy). Left suspended, the analyser reads silence → VAD never fires → no
+  // chunks are ever sent (and the worklet never runs), so the meeting produces
+  // no output with no error. We're inside a click handler, so resume() is allowed.
+  if (audioCtx.state === 'suspended') {
+    try { await audioCtx.resume(); } catch (e) {}
+  }
+  if (audioCtx.state !== 'running') {
+    statusEl.textContent = 'Audio is blocked by the browser — click the page and press Start again.';
+    audioCtx.close(); audioCtx = null;
+    micStream.getTracks().forEach(t => t.stop()); micStream = null;
+    return;
+  }
 
   // Interview mode: the interviewer usually comes through headphones, which the
   // mic never hears — mix in the meeting tab's audio via screen-share capture.
